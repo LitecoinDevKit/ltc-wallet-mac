@@ -108,7 +108,9 @@ jobs:
             Draft release built by GitHub Actions.
 
             **Install**
-            - macOS: open the `.dmg` and drag the app to Applications.
+            - macOS: open the `.dmg` and drag the app to Applications. This build is
+              **signed and notarized** (Developer ID). Verify with `spctl -a -vv` —
+              see [`docs/VERIFYING.md`](https://github.com/${{ github.repository }}/blob/main/docs/VERIFYING.md) §3.
             - Linux: prefer the `.AppImage` (`chmod +x` then run), or install the `.deb`.
 
             **Verify your download** — see [`docs/VERIFYING.md`](https://github.com/${{ github.repository }}/blob/main/docs/VERIFYING.md).

@@ -140,6 +140,23 @@ fn handshake(client: &ElectrumClient) -> Result<(), bdk_electrum::electrum_clien
     }
 }
 
+/// Connect, handshake, and read tip height — used by Settings “Test connection”.
+pub fn probe_tip(
+    url: &str,
+    validate_domain: bool,
+) -> Result<(u32, u64), WalletError> {
+    let started = std::time::Instant::now();
+    let client = connect_with_timeout(url, validate_domain, 15)?;
+    handshake(&client).map_err(|e| WalletError::Electrum(e.to_string()))?;
+    let sub = client
+        .inner
+        .block_headers_subscribe()
+        .map_err(|e| WalletError::Electrum(e.to_string()))?;
+    let tip_height = sub.height as u32;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    Ok((tip_height, latency_ms))
+}
+
 /// Estimate a fee rate in sat/vB via Electrum `blockchain.estimatefee`.
 ///
 /// Electrum returns LTC/kB (same units as Bitcoin Core). Values `<= 0` mean

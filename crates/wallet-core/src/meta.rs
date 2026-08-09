@@ -25,6 +25,7 @@ pub const MWEB_HISTORY_ENC_FILE: &str = "mweb_history.enc";
 pub const MWEB_SEAL_COUNTER_FILE: &str = "mweb_seal_counter.txt";
 pub use crate::contacts::CONTACTS_FILE;
 pub use crate::labels::TX_LABELS_FILE;
+pub use crate::utxo_labels::UTXO_LABELS_FILE;
 
 fn default_true() -> bool {
     true
@@ -210,6 +211,7 @@ pub fn remove_wallet_files(data_dir: &Path) -> Result<(), WalletError> {
         mweb_index_enc_path(data_dir),
         mweb_history_enc_path(data_dir),
         data_dir.join(TX_LABELS_FILE),
+        data_dir.join(UTXO_LABELS_FILE),
         data_dir.join(CONTACTS_FILE),
         data_dir.join(MNEMONIC_FILE),
         data_dir.join(MNEMONIC_ENC_FILE),

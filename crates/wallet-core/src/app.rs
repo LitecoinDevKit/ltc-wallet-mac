@@ -14,15 +14,18 @@ use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions};
 
 use crate::descriptors::{self, create_params, load_params};
 use crate::dto::{
-    AddressReuseHint, CombinedSummary, CreateWalletRequest, CreateWalletResponse, FeeEstimate,
-    ContactRecord, DeleteContactRequest, MigrateEncryptRequest, MwebBroadcastResult, MwebScheme,
-    MwebSendPreview, MwebSendRequest, PeginPreview, PeginRequest, PeginResult, PegoutPreview,
-    PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
-    SetUtxoLockedRequest, SyncResult, TxKind, TxRecord, UpsertContactRequest, UtxoRecord,
-    UnlockRequest, UpdateSettingsRequest, WalletSettings, WalletSummary, DEFAULT_MWEB_FEE_SATS,
+    AddressReuseHint, CombinedSummary, CreateWalletRequest, CreateWalletResponse, ElectrumProbe,
+    FeeEstimate, ContactRecord, DeleteContactRequest, MigrateEncryptRequest, MwebBroadcastResult,
+    MwebScheme, MwebSendPreview, MwebSendRequest, PeginPreview, PeginRequest, PeginResult,
+    PegoutPreview, PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest, SendResult,
+    SetTxLabelRequest, SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxKind, TxRecord,
+    UpsertContactRequest, UtxoRecord, UnlockRequest, UpdateSettingsRequest, WalletSettings,
+    WalletSummary, DEFAULT_MWEB_FEE_SATS,
 };
 use crate::contacts;
 use crate::labels;
+use crate::metadata::{self, MetadataImportResult};
+use crate::utxo_labels;
 use crate::electrum::{self, BATCH_SIZE, MIN_FEE_RATE_SAT_VB, STOP_GAP};
 use crate::error::WalletError;
 use crate::meta::{self, WalletMeta};
@@ -538,6 +541,62 @@ impl WalletApp {
         Ok(())
     }
 
+    /// Set or clear a local UTXO label (non-secret sidecar).
+    pub fn set_utxo_label(&self, req: SetUtxoLabelRequest) -> Result<(), WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        utxo_labels::set_label(&state.data_dir, &req.outpoint, &req.label)
+    }
+
+    /// Export contacts + tx/utxo labels as pretty JSON (no secrets).
+    pub fn export_metadata_json(&self) -> Result<String, WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        metadata::export_json(&state.data_dir)
+    }
+
+    /// Merge a metadata JSON bundle into local sidecars.
+    pub fn import_metadata_json(&self, json: &str) -> Result<MetadataImportResult, WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        metadata::import_json(&state.data_dir, json)
+    }
+
+    /// Probe an Electrum URL (or the configured one) for tip + latency.
+    pub fn test_electrum(&self, url: Option<String>) -> Result<ElectrumProbe, WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        let url = url
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| state.electrum_url.clone());
+        meta::validate_electrum_url(&url)?;
+        let (tip_height, latency_ms) =
+            electrum::probe_tip(&url, state.electrum_validate_domain)?;
+        Ok(ElectrumProbe {
+            url,
+            tip_height,
+            latency_ms,
+        })
+    }
+
+    /// Built-in Electrum-LTC candidates for the loaded wallet's network.
+    pub fn default_electrum_urls(&self) -> Result<Vec<String>, WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        Ok(state
+            .network
+            .default_electrum_urls()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect())
+    }
+
     pub fn update_settings(&self, req: UpdateSettingsRequest) -> Result<(), WalletError> {
         self.ensure_unlocked()?;
         meta::validate_electrum_url(&req.electrum_url)?;
@@ -862,10 +921,12 @@ impl WalletApp {
             .wallet
             .persist(&mut state.db)
             .map_err(|e| WalletError::Persist(e.to_string()))?;
+        let creates_change = psbt.unsigned_tx.output.len() > 1;
         Ok(SendPreview {
             amount_sats,
             fee_sats,
             fee_rate_sat_vb,
+            creates_change,
         })
     }
 
@@ -920,6 +981,10 @@ impl WalletApp {
         let mut guard = self.lock_state()?;
         let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
         let resolved = resolve_pegin_request(state, req)?;
+        let total_from_transparent_sats = resolved
+            .amount_sats
+            .saturating_add(resolved.transparent_fee_sats);
+        let creates_change = pegin_selection_creates_change(state, &resolved, total_from_transparent_sats);
         Ok(PeginPreview {
             amount_sats: resolved.amount_sats,
             private_credit_sats: resolved
@@ -927,9 +992,8 @@ impl WalletApp {
                 .saturating_sub(resolved.mweb_fee_sats),
             mweb_fee_sats: resolved.mweb_fee_sats,
             transparent_fee_sats: resolved.transparent_fee_sats,
-            total_from_transparent_sats: resolved
-                .amount_sats
-                .saturating_add(resolved.transparent_fee_sats),
+            total_from_transparent_sats,
+            creates_change,
         })
     }
 
@@ -1391,6 +1455,10 @@ impl MemoryBackedApp {
             ..req
         };
         let resolved = resolve_pegin_request(state, req)?;
+        let total_from_transparent_sats = resolved
+            .amount_sats
+            .saturating_add(resolved.transparent_fee_sats);
+        let creates_change = pegin_selection_creates_change(state, &resolved, total_from_transparent_sats);
         Ok(PeginPreview {
             amount_sats: resolved.amount_sats,
             private_credit_sats: resolved
@@ -1398,9 +1466,8 @@ impl MemoryBackedApp {
                 .saturating_sub(resolved.mweb_fee_sats),
             mweb_fee_sats: resolved.mweb_fee_sats,
             transparent_fee_sats: resolved.transparent_fee_sats,
-            total_from_transparent_sats: resolved
-                .amount_sats
-                .saturating_add(resolved.transparent_fee_sats),
+            total_from_transparent_sats,
+            creates_change,
         })
     }
 
@@ -1795,8 +1862,32 @@ fn parse_outpoint(raw: &str) -> Result<OutPoint, WalletError> {
     })
 }
 
+/// Manual peg-in coin selection leaves transparent change when inputs exceed amount+fee.
+fn pegin_selection_creates_change(
+    state: &WalletState,
+    resolved: &PeginRequest,
+    total_from_transparent_sats: u64,
+) -> bool {
+    let Some(ops) = resolved.selected_outpoints.as_ref() else {
+        return false;
+    };
+    let mut sum = 0u64;
+    for raw in ops {
+        let Ok(op) = parse_outpoint(raw) else {
+            continue;
+        };
+        if let Some(utxo) = state.wallet.get_utxo(op) {
+            sum = sum.saturating_add(utxo.txout.value.to_sat());
+        }
+    }
+    sum > total_from_transparent_sats
+}
+
 fn collect_unspent(state: &WalletState) -> Vec<UtxoRecord> {
     let tip = state.wallet.local_chain().tip().height();
+    let labels = utxo_labels::read_labels(&state.data_dir)
+        .map(|f| f.labels)
+        .unwrap_or_default();
     let mut rows: Vec<UtxoRecord> = state
         .wallet
         .list_unspent()
@@ -1811,14 +1902,17 @@ fn collect_unspent(state: &WalletState) -> Vec<UtxoRecord> {
                 KeychainKind::External => "external",
                 KeychainKind::Internal => "internal",
             };
+            let outpoint = utxo.outpoint.to_string();
+            let label = labels.get(&outpoint).cloned().unwrap_or_default();
             UtxoRecord {
-                outpoint: utxo.outpoint.to_string(),
+                outpoint,
                 txid: utxo.outpoint.txid.to_string(),
                 vout: utxo.outpoint.vout,
                 amount_sats: utxo.txout.value.to_sat(),
                 keychain: keychain.into(),
                 confirmations,
                 locked: state.wallet.is_outpoint_locked(utxo.outpoint),
+                label,
             }
         })
         .collect();

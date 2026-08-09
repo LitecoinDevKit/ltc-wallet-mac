@@ -308,6 +308,20 @@
           </button>
           <button
             type="button"
+            id="nav-coins"
+            class="nav-item"
+            role="tab"
+            aria-controls="view-coins"
+            aria-selected="false"
+          >
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="9" cy="12" r="5.5" />
+              <circle cx="15.5" cy="12" r="5.5" />
+            </svg>
+            <span class="nav-label">Coins</span>
+          </button>
+          <button
+            type="button"
             id="nav-settings"
             class="nav-item"
             role="tab"
@@ -353,6 +367,11 @@
             </button>
           </div>
         </header>
+        <div class="status-strip" id="status-strip" aria-live="polite">
+          <span class="status-strip-item" id="status-electrum">Electrum · not synced</span>
+          <span class="status-strip-sep" aria-hidden="true">·</span>
+          <span class="status-strip-item" id="status-mweb" hidden>MWEB · idle</span>
+        </div>
 
         <div class="views" id="views">
           <!-- Balance: Nexus composition — balance on the gradient, glass tab pills,
@@ -768,6 +787,22 @@
             </div>
           </section>
 
+          <section id="view-coins" class="view" role="tabpanel" aria-labelledby="nav-coins" hidden>
+            <div class="card">
+              <div class="sheet-head">
+                <h3>Coins</h3>
+                <button type="button" id="btn-refresh-coins" class="btn btn-ghost btn-sm">Refresh</button>
+              </div>
+              <p class="hint">
+                Freeze coins so automatic sends skip them. Labels stay on this computer and are
+                included in metadata export.
+              </p>
+              <p class="hint mono" id="coins-sum" hidden></p>
+              <ul class="utxo-list" id="coins-utxo-list"></ul>
+              <p class="hint" id="coins-utxo-empty">No transparent coins yet.</p>
+            </div>
+          </section>
+
           <section id="view-history" class="view" role="tabpanel" aria-labelledby="nav-history" hidden>
             <div class="card">
               <div class="sheet-head">
@@ -930,6 +965,19 @@
               <p class="hint" id="contacts-empty">No contacts yet.</p>
             </div>
 
+            <div class="card" id="metadata-card">
+              <h3>Metadata backup</h3>
+              <p class="hint">
+                Contacts and labels are not in your recovery phrase. Export them before wiping or
+                moving to another computer, then import after restore. Merge never deletes local
+                entries that are missing from the file.
+              </p>
+              <div class="row">
+                <button type="button" id="btn-export-metadata" class="btn btn-secondary">Export…</button>
+                <button type="button" id="btn-import-metadata" class="btn btn-ghost">Import…</button>
+              </div>
+            </div>
+
             <div class="card" id="privacy-disclosure">
               <h3>What leaves this computer</h3>
               <ul class="privacy-list">
@@ -962,6 +1010,16 @@
                 <span class="field-label">Electrum URL</span>
                 <input id="settings-electrum" class="mono" type="text" spellcheck="false" />
               </label>
+              <div class="electrum-presets" id="electrum-presets" hidden>
+                <span class="field-label">Known servers</span>
+                <div class="preset-row" id="electrum-preset-buttons"></div>
+              </div>
+              <div class="row">
+                <button type="button" id="btn-test-electrum" class="btn btn-ghost btn-sm">
+                  Test connection
+                </button>
+                <span class="hint" id="electrum-test-result"></span>
+              </div>
               <label class="check">
                 <input id="settings-validate-tls" type="checkbox" />
                 <span>Verify TLS certificates (recommended)</span>
@@ -988,7 +1046,10 @@
                   spellcheck="false"
                   placeholder="http://127.0.0.1:9332"
                 />
-                <span class="hint">Optional. Only used if broadcasting over P2P fails.</span>
+                <span class="hint">
+                  Optional for transparent sends. Required fallback for pure MWEB broadcast when
+                  P2P peers cannot accept the transaction.
+                </span>
               </label>
               <label class="field">
                 <span class="field-label">MWEB P2P peers</span>

@@ -185,4 +185,4 @@ Ops reference: sibling `bdk/docs/MWEB_PEER_OPS.md`, `LITECOIN_E2E.md` (`mainnet_
 3. ~~Onboarding + mnemonic + Home + Send + usability~~
 4. ~~Encrypted secrets + settings + packaging prep~~
 5. ~~MWEB store / tip seam / peg-in / send / peg-out surface~~
-6. Live MWEB E2E + notarized release
+6. Live MWEB E2E ([`MWEB_E2E.md`](MWEB_E2E.md)) + notarized release ([`NOTARIZATION.md`](NOTARIZATION.md))

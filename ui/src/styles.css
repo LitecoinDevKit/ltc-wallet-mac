@@ -502,6 +502,53 @@ code {
   color: var(--text-glass-1);
 }
 
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  flex: 0 0 auto;
+  padding: 0.35rem 1.5rem 0.55rem;
+  border-bottom: 1px solid var(--glass-hairline);
+  background: var(--chrome-bg);
+  color: var(--text-glass-2, var(--muted));
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.status-strip-item {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.status-strip-sep {
+  opacity: 0.45;
+}
+
+.electrum-presets {
+  margin: 0.35rem 0 0.75rem;
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+.preset-row .btn {
+  font-size: 0.75rem;
+}
+
+.utxo-label-input {
+  width: 100%;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+}
+
 .topbar-title {
   min-width: 0;
   overflow: hidden;

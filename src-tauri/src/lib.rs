@@ -5,12 +5,13 @@ use std::sync::{mpsc, Arc};
 use tauri::{AppHandle, Manager, State};
 use wallet_core::{
     AddressReuseHint, CombinedSummary, ContactRecord, CreateWalletRequest, CreateWalletResponse,
-    DeleteContactRequest, FeeEstimate, FeeLadder, HistoryExportFormat, MigrateEncryptRequest,
-    MwebBroadcastResult, MwebSendPreview, MwebSendRequest, MwebSyncProgress, PeginPreview,
-    PeginRequest, PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest, SendPreview,
-    SendRequest, SendResult, SetTxLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment,
-    TxRecord, UnlockRequest, UpdateSettingsRequest, UpsertContactRequest, UtxoRecord, WalletApp,
-    WalletSettings, WalletSummary,
+    DeleteContactRequest, ElectrumProbe, FeeEstimate, FeeLadder, HistoryExportFormat,
+    MetadataImportResult, MigrateEncryptRequest, MwebBroadcastResult, MwebSendPreview,
+    MwebSendRequest, MwebSyncProgress, PeginPreview, PeginRequest, PeginResult, PegoutPreview,
+    PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
+    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment, TxRecord, UnlockRequest,
+    UpdateSettingsRequest, UpsertContactRequest, UtxoRecord, WalletApp, WalletSettings,
+    WalletSummary,
 };
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -303,6 +304,94 @@ async fn set_utxo_locked(
 }
 
 #[tauri::command]
+async fn set_utxo_label(
+    state: State<'_, Arc<WalletApp>>,
+    req: SetUtxoLabelRequest,
+) -> Result<(), String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.set_utxo_label(req).map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn export_metadata(
+    app: AppHandle,
+    state: State<'_, Arc<WalletApp>>,
+) -> Result<Option<String>, String> {
+    let wallet = Arc::clone(&state);
+    let body = tauri::async_runtime::spawn_blocking(move || {
+        wallet.export_metadata_json().map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let (tx, rx) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let path = rfd::FileDialog::new()
+            .set_title("Export wallet metadata")
+            .set_file_name("ltc-wallet-metadata.json")
+            .add_filter("JSON", &["json"])
+            .save_file();
+        let _ = tx.send(path);
+    })
+    .map_err(|e| e.to_string())?;
+
+    let Some(path) = rx.recv().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+async fn import_metadata(
+    app: AppHandle,
+    state: State<'_, Arc<WalletApp>>,
+) -> Result<Option<MetadataImportResult>, String> {
+    let (tx, rx) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let path = rfd::FileDialog::new()
+            .set_title("Import wallet metadata")
+            .add_filter("JSON", &["json"])
+            .pick_file();
+        let _ = tx.send(path);
+    })
+    .map_err(|e| e.to_string())?;
+
+    let Some(path) = rx.recv().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let wallet = Arc::clone(&state);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        wallet.import_metadata_json(&json).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(Some(result))
+}
+
+#[tauri::command]
+async fn test_electrum(
+    state: State<'_, Arc<WalletApp>>,
+    url: Option<String>,
+) -> Result<ElectrumProbe, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.test_electrum(url).map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn default_electrum_urls(state: State<'_, Arc<WalletApp>>) -> Result<Vec<String>, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.default_electrum_urls().map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn preview_send(
     state: State<'_, Arc<WalletApp>>,
     req: SendRequest,
@@ -576,6 +665,11 @@ pub fn run() {
             estimate_fee,
             list_unspent,
             set_utxo_locked,
+            set_utxo_label,
+            export_metadata,
+            import_metadata,
+            test_electrum,
+            default_electrum_urls,
             preview_send,
             send_ltc,
             preview_pegin,

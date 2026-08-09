@@ -49,6 +49,7 @@ type SendPreview = {
   amount_sats: number;
   fee_sats: number;
   fee_rate_sat_vb: number;
+  creates_change?: boolean;
 };
 
 type PeginPreview = {
@@ -57,6 +58,19 @@ type PeginPreview = {
   mweb_fee_sats: number;
   transparent_fee_sats: number;
   total_from_transparent_sats: number;
+  creates_change?: boolean;
+};
+
+type ElectrumProbe = {
+  url: string;
+  tip_height: number;
+  latency_ms: number;
+};
+
+type MetadataImportResult = {
+  contacts_upserted: number;
+  tx_labels_upserted: number;
+  utxo_labels_upserted: number;
 };
 
 type MwebSendPreview = {
@@ -89,6 +103,7 @@ type UtxoRecord = {
   keychain: string;
   confirmations: number;
   locked: boolean;
+  label?: string;
 };
 
 type TxRecord = {
@@ -199,12 +214,13 @@ const PHASE_LABELS: Record<Phase, string> = {
 };
 
 /** Top-level panes. Send/Receive/Private are cards inside the Balance sheet. */
-const VIEWS = ["balance", "history", "settings"] as const;
+const VIEWS = ["balance", "history", "coins", "settings"] as const;
 type View = (typeof VIEWS)[number];
 
 const VIEW_TITLES: Record<View, string> = {
   balance: "Balance",
   history: "History",
+  coins: "Coins",
   settings: "Settings",
 };
 
@@ -452,6 +468,19 @@ const el = {
   btnPegin: document.querySelector<HTMLButtonElement>("#btn-pegin")!,
   btnMwebSend: document.querySelector<HTMLButtonElement>("#btn-mweb-send")!,
   btnPegout: document.querySelector<HTMLButtonElement>("#btn-pegout")!,
+  statusStrip: document.querySelector<HTMLElement>("#status-strip")!,
+  statusElectrum: document.querySelector<HTMLElement>("#status-electrum")!,
+  statusMweb: document.querySelector<HTMLElement>("#status-mweb")!,
+  coinsUtxoList: document.querySelector<HTMLUListElement>("#coins-utxo-list")!,
+  coinsUtxoEmpty: document.querySelector<HTMLElement>("#coins-utxo-empty")!,
+  coinsSum: document.querySelector<HTMLElement>("#coins-sum")!,
+  btnRefreshCoins: document.querySelector<HTMLButtonElement>("#btn-refresh-coins")!,
+  electrumPresets: document.querySelector<HTMLElement>("#electrum-presets")!,
+  electrumPresetButtons: document.querySelector<HTMLElement>("#electrum-preset-buttons")!,
+  btnTestElectrum: document.querySelector<HTMLButtonElement>("#btn-test-electrum")!,
+  electrumTestResult: document.querySelector<HTMLElement>("#electrum-test-result")!,
+  btnExportMetadata: document.querySelector<HTMLButtonElement>("#btn-export-metadata")!,
+  btnImportMetadata: document.querySelector<HTMLButtonElement>("#btn-import-metadata")!,
 };
 
 const views = Object.fromEntries(
@@ -487,6 +516,7 @@ let historyFilter: HistoryFilter = "all";
 let historySearchQuery = "";
 let contactsCache: ContactRecord[] = [];
 let utxoCache: UtxoRecord[] = [];
+let lastElectrumUrl: string | null = null;
 const sendSelectedOutpoints = new Set<string>();
 const peginSelectedOutpoints = new Set<string>();
 /** Local notes keyed by txid/wtxid (never sent to litview). */
@@ -927,6 +957,8 @@ function setView(next: View) {
   }
   el.views.classList.toggle("views-balance", next === "balance");
   applyCardState();
+  if (next === "coins") void refreshUtxos();
+  if (next === "settings") void loadElectrumPresets();
 }
 
 function setCard(next: Card | null) {
@@ -1333,6 +1365,140 @@ async function refreshTxLabels() {
     txLabels = (await invoke<Record<string, string>>("get_tx_labels")) ?? {};
   } catch {
     txLabels = {};
+  }
+}
+
+
+type BroadcastFailureKind =
+  | "needs_rpc"
+  | "mempool_conflict"
+  | "already_known"
+  | "fee_too_low"
+  | "spent_or_missing"
+  | "other";
+
+function classifyBroadcastFailure(message: string): BroadcastFailureKind {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("configure a litecoin rpc") ||
+    lower.includes("mweb p2p") ||
+    lower.includes("could not reach any mweb peer") ||
+    lower.includes("decode failed") ||
+    (lower.includes("could not read this transaction") && lower.includes("mweb"))
+  ) {
+    return "needs_rpc";
+  }
+  if (lower.includes("mempool-conflict") || lower.includes("conflicts with another")) {
+    return "mempool_conflict";
+  }
+  if (
+    lower.includes("already broadcast") ||
+    lower.includes("already known") ||
+    lower.includes("already in block")
+  ) {
+    return "already_known";
+  }
+  if (lower.includes("fee is too low") || lower.includes("insufficient fee")) {
+    return "fee_too_low";
+  }
+  if (
+    lower.includes("already been spent") ||
+    lower.includes("unknown to the network") ||
+    lower.includes("missing inputs")
+  ) {
+    return "spent_or_missing";
+  }
+  return "other";
+}
+
+function electrumHostLabel(url: string | null | undefined): string {
+  if (!url) return "—";
+  try {
+    const stripped = url.replace(/^(ssl|tcp):\/\//i, "");
+    return stripped.split("/")[0] || url;
+  } catch {
+    return url;
+  }
+}
+
+function updateStatusStrip(opts?: {
+  tip?: number | null;
+  electrumUrl?: string | null;
+  mwebStatus?: string | null;
+  mwebHeight?: number | null;
+  mwebStale?: boolean;
+  error?: string | null;
+}) {
+  const tip = opts?.tip ?? lastSummary?.tip_height ?? null;
+  const url = opts?.electrumUrl ?? lastElectrumUrl;
+  const tipPart = tip != null ? `tip ${tip.toLocaleString("en-US")}` : "not synced";
+  const host = electrumHostLabel(url);
+  if (opts?.error) {
+    el.statusElectrum.textContent = `Electrum · error — ${opts.error}`;
+  } else {
+    el.statusElectrum.textContent = `Electrum · ${tipPart} · ${host}`;
+  }
+  const mwebStatus = opts?.mwebStatus ?? lastCombined?.mweb_status ?? "";
+  const mwebHeight = opts?.mwebHeight ?? lastCombined?.mweb_synced_height ?? null;
+  const mwebStale = opts?.mwebStale ?? lastCombined?.mweb_stale ?? false;
+  const showMweb = Boolean(lastCombined) || Boolean(mwebStatus);
+  el.statusMweb.hidden = !showMweb;
+  if (showMweb) {
+    const heightPart =
+      mwebHeight != null ? `synced ${mwebHeight.toLocaleString("en-US")}` : "not synced";
+    const stalePart = mwebStale ? " · stale" : "";
+    const detail = mwebStatus ? ` — ${mwebStatus}` : "";
+    el.statusMweb.textContent = `MWEB · ${heightPart}${stalePart}${detail}`;
+  }
+}
+
+async function showBroadcastFailure(raw: unknown): Promise<void> {
+  const message = String(raw);
+  const kind = classifyBroadcastFailure(message);
+  let guidance =
+    "Sync the wallet, then check History → Pending. There is no replace-by-fee tool in this wallet.";
+  if (kind === "needs_rpc") {
+    guidance =
+      "Pure MWEB transactions need a reachable MWEB peer and usually a litecoind RPC URL. Open Settings → Connection, set Litecoin RPC / MWEB peers, save, then try again.";
+  } else if (kind === "mempool_conflict") {
+    guidance =
+      "Another unconfirmed transaction is spending the same coins. Wait for it to confirm (or drop), then Sync and check History → Pending.";
+  } else if (kind === "already_known") {
+    guidance = "The network already has this transaction. Sync, then open History → Pending.";
+  } else if (kind === "fee_too_low") {
+    guidance = "Increase the fee rate on Send and try again.";
+  } else if (kind === "spent_or_missing") {
+    guidance = "Sync the wallet so local coins match the network, then try again.";
+  }
+
+  const result = await openModal({
+    title: "Broadcast failed",
+    wide: true,
+    build: (body) => {
+      appendParagraph(body, message, "lede");
+      appendParagraph(body, guidance, "hint");
+    },
+    actions: [
+      ...(kind === "needs_rpc"
+        ? [{ id: "settings", label: "Open Settings", kind: "secondary" as const }]
+        : []),
+      { id: "history", label: "History (Pending)", kind: "secondary" },
+      { id: "sync", label: "Sync now", kind: "primary" },
+      { id: "dismiss", label: "Dismiss", kind: "ghost" },
+    ],
+  });
+  if (result === "settings") {
+    setView("settings");
+    el.settingsRpc.focus();
+  } else if (result === "history") {
+    historyFilter = "pending";
+    for (const chip of el.historyFilterChips) {
+      chip.setAttribute("aria-pressed", String(chip.dataset.filter === "pending"));
+    }
+    setView("history");
+    renderHistoryFiltered();
+  } else if (result === "sync") {
+    void runSync({ quiet: false });
   }
 }
 
@@ -2211,6 +2377,7 @@ function renderSummary(s: WalletSummary) {
   updateBackupBanner();
   updateEmptyFundingState();
   updateSecurityChecklist();
+  updateStatusStrip({ tip: s.tip_height });
 }
 
 function renderCombined(c: CombinedSummary) {
@@ -2267,6 +2434,12 @@ function renderCombined(c: CombinedSummary) {
   el.swapBalancePrivate.textContent = privateChip;
   updateBackupBanner();
   updateMaturityBanner(c.mweb_immature_sats);
+  updateStatusStrip({
+    tip: c.transparent.tip_height,
+    mwebStatus: c.mweb_status,
+    mwebHeight: c.mweb_synced_height,
+    mwebStale: c.mweb_stale,
+  });
   updateEmptyFundingState();
   updateSecurityChecklist();
 }
@@ -2834,10 +3007,46 @@ async function loadSettings() {
     el.settingsRpc.value = s.litecoin_rpc_url ?? "";
     el.settingsPeers.value = s.mweb_peers.join(", ");
     el.settingsMwebScheme.value = s.mweb_scheme ?? "litecoin-core";
+    if (s.electrum_active_url) lastElectrumUrl = s.electrum_active_url;
+    else lastElectrumUrl = s.electrum_url;
+    updateStatusStrip({
+      tip: lastSummary?.tip_height,
+      electrumUrl: lastElectrumUrl,
+      mwebStatus: lastCombined?.mweb_status,
+      mwebHeight: lastCombined?.mweb_synced_height,
+      mwebStale: lastCombined?.mweb_stale,
+    });
     updateSecurityChecklist();
     await refreshContacts();
+    await loadElectrumPresets();
   } catch {
     /* ignore */
+  }
+}
+
+async function loadElectrumPresets() {
+  try {
+    const urls = await invoke<string[]>("default_electrum_urls");
+    el.electrumPresetButtons.textContent = "";
+    if (!urls?.length) {
+      el.electrumPresets.hidden = true;
+      return;
+    }
+    el.electrumPresets.hidden = false;
+    for (const url of urls) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-ghost btn-sm";
+      btn.textContent = electrumHostLabel(url);
+      btn.title = url;
+      btn.addEventListener("click", () => {
+        el.settingsElectrum.value = url;
+        el.electrumTestResult.textContent = "";
+      });
+      el.electrumPresetButtons.appendChild(btn);
+    }
+  } catch {
+    el.electrumPresets.hidden = true;
   }
 }
 
@@ -3038,7 +3247,53 @@ async function boot() {
 }
 
 async function enterReady() {
-  displayUnit = readDisplayUnit();
+  
+el.btnRefreshCoins.addEventListener("click", () => void refreshUtxos());
+
+el.btnTestElectrum.addEventListener("click", async () => {
+  el.electrumTestResult.textContent = "Testing…";
+  try {
+    // Persist TLS toggle for the probe by saving is not required — probe uses stored settings.
+    // Use the URL currently typed in the field.
+    const probe = await invoke<ElectrumProbe>("test_electrum", {
+      url: el.settingsElectrum.value.trim() || null,
+    });
+    el.electrumTestResult.textContent = `OK · tip ${probe.tip_height.toLocaleString(
+      "en-US",
+    )} · ${probe.latency_ms} ms · ${electrumHostLabel(probe.url)}`;
+    lastElectrumUrl = probe.url;
+    updateStatusStrip({ tip: probe.tip_height, electrumUrl: probe.url });
+  } catch (e) {
+    el.electrumTestResult.textContent = String(e);
+  }
+});
+
+el.btnExportMetadata.addEventListener("click", async () => {
+  try {
+    const path = await invoke<string | null>("export_metadata");
+    if (path) setStatus(`Metadata exported to ${path}`, "success");
+  } catch (e) {
+    setError(String(e));
+  }
+});
+
+el.btnImportMetadata.addEventListener("click", async () => {
+  try {
+    const result = await invoke<MetadataImportResult | null>("import_metadata");
+    if (!result) return;
+    await refreshContacts();
+    await refreshTxLabels();
+    await refreshUtxos();
+    setStatus(
+      `Imported ${result.contacts_upserted} contacts, ${result.tx_labels_upserted} tx labels, ${result.utxo_labels_upserted} coin labels.`,
+      "success",
+    );
+  } catch (e) {
+    setError(String(e));
+  }
+});
+
+displayUnit = readDisplayUnit();
   hideBalances = readHideBalances();
   syncAmountFieldLabels();
   const s = await invoke<WalletSummary>("load_wallet");
@@ -3210,9 +3465,17 @@ async function runSync(opts: { quiet: boolean }): Promise<boolean> {
     const receivedSignal = result.new_txs > 0 || pendingRose;
     lastPendingSats = pendingNow;
     if (result.electrum_server) {
+      lastElectrumUrl = result.electrum_server;
       el.settingsActiveServer.hidden = false;
       el.settingsActiveServer.textContent = `Last sync used: ${result.electrum_server}`;
     }
+    updateStatusStrip({
+      tip: result.summary.tip_height,
+      electrumUrl: result.electrum_server ?? lastElectrumUrl,
+      mwebStatus: lastCombined?.mweb_status,
+      mwebHeight: lastCombined?.mweb_synced_height,
+      mwebStale: lastCombined?.mweb_stale,
+    });
     if (result.warnings?.length) {
       // Cross-check findings outrank the feel-good sync message.
       for (const warning of result.warnings) console.warn(warning);
@@ -3237,6 +3500,7 @@ async function runSync(opts: { quiet: boolean }): Promise<boolean> {
     const message = String(e);
     // Expected when the user locks mid-sync — not a failure to surface.
     if (/locked/i.test(message)) return false;
+    updateStatusStrip({ error: message });
     if (opts.quiet) setStatus(`Auto-sync failed: ${e}`, "error");
     else setError(message);
     return false;
@@ -3697,11 +3961,21 @@ function renderUtxoList(panel: CoinControlPanel) {
       utxo.confirmations === 0
         ? "pending"
         : `${utxo.confirmations.toLocaleString("en-US")} conf`;
-    meta.textContent = `${kind} · ${conf}${utxo.locked ? " · frozen" : ""}`;
+    const labelBit = utxo.label ? ` · ${utxo.label}` : "";
+    meta.textContent = `${kind} · ${conf}${utxo.locked ? " · frozen" : ""}${labelBit}`;
     const id = document.createElement("span");
     id.className = "utxo-id";
     id.textContent = utxo.outpoint;
-    main.append(amt, meta, id);
+    const labelInput = document.createElement("input");
+    labelInput.type = "text";
+    labelInput.className = "utxo-label-input";
+    labelInput.placeholder = "Label (optional)";
+    labelInput.maxLength = MAX_TX_LABEL_CHARS;
+    labelInput.value = utxo.label ?? "";
+    labelInput.addEventListener("change", () => {
+      void persistUtxoLabel(utxo.outpoint, labelInput.value);
+    });
+    main.append(amt, meta, id, labelInput);
 
     const freeze = document.createElement("button");
     freeze.type = "button";
@@ -3713,6 +3987,69 @@ function renderUtxoList(panel: CoinControlPanel) {
     panel.list.appendChild(li);
   }
   updateCoinControlSum(panel);
+}
+
+async function persistUtxoLabel(outpoint: string, label: string) {
+  try {
+    await invoke("set_utxo_label", { req: { outpoint, label } });
+    const row = utxoCache.find((u) => u.outpoint === outpoint);
+    if (row) row.label = label.trim();
+    renderCoinsList();
+  } catch (e) {
+    setStatus(String(e), "error");
+  }
+}
+
+function renderCoinsList() {
+  el.coinsUtxoList.textContent = "";
+  el.coinsUtxoEmpty.hidden = utxoCache.length > 0;
+  let frozen = 0;
+  for (const utxo of utxoCache) {
+    if (utxo.locked) frozen += 1;
+    const li = document.createElement("li");
+    li.className = utxo.locked ? "utxo-row is-locked" : "utxo-row";
+    const main = document.createElement("div");
+    main.className = "utxo-main";
+    const amt = document.createElement("span");
+    amt.textContent = formatAmountPlain(utxo.amount_sats);
+    const meta = document.createElement("span");
+    meta.className = "utxo-meta";
+    const kind = utxo.keychain === "internal" ? "change" : "receive";
+    const conf =
+      utxo.confirmations === 0
+        ? "pending"
+        : `${utxo.confirmations.toLocaleString("en-US")} conf`;
+    meta.textContent = `${kind} · ${conf}${utxo.locked ? " · frozen" : ""}`;
+    const id = document.createElement("span");
+    id.className = "utxo-id";
+    id.textContent = utxo.outpoint;
+    const labelInput = document.createElement("input");
+    labelInput.type = "text";
+    labelInput.className = "utxo-label-input";
+    labelInput.placeholder = "Label (optional)";
+    labelInput.maxLength = MAX_TX_LABEL_CHARS;
+    labelInput.value = utxo.label ?? "";
+    labelInput.addEventListener("change", () => {
+      void persistUtxoLabel(utxo.outpoint, labelInput.value);
+    });
+    main.append(amt, meta, id, labelInput);
+    const freeze = document.createElement("button");
+    freeze.type = "button";
+    freeze.className = "btn btn-ghost btn-sm utxo-freeze";
+    freeze.textContent = utxo.locked ? "Unfreeze" : "Freeze";
+    freeze.addEventListener("click", () => void toggleUtxoLocked(utxo));
+    li.append(main, freeze);
+    el.coinsUtxoList.appendChild(li);
+  }
+  if (utxoCache.length === 0) {
+    el.coinsSum.hidden = true;
+    el.coinsSum.textContent = "";
+  } else {
+    el.coinsSum.hidden = false;
+    el.coinsSum.textContent = `${utxoCache.length} coin${
+      utxoCache.length === 1 ? "" : "s"
+    }${frozen ? ` · ${frozen} frozen` : ""}`;
+  }
 }
 
 const sendCoinPanel: CoinControlPanel = {
@@ -3750,6 +4087,7 @@ async function refreshUtxos() {
   pruneSelectedOutpoints(peginSelectedOutpoints);
   renderUtxoList(sendCoinPanel);
   renderUtxoList(peginCoinPanel);
+  renderCoinsList();
 }
 
 async function toggleUtxoLocked(utxo: UtxoRecord) {
@@ -3873,6 +4211,11 @@ el.sendForm.addEventListener("submit", async (event) => {
       "Network fee is at least half of the amount you are sending. You can still proceed if this is intentional.",
     );
   }
+  if (preview.creates_change && selected_outpoints?.length) {
+    reuseWarnings.push(
+      "This selection creates a change output. Change can link the history of the coins you selected on the public chain.",
+    );
+  }
   let readLabel = () => "";
   const confirmed = await openConfirm({
     title: "Review transaction",
@@ -3916,7 +4259,7 @@ el.sendForm.addEventListener("submit", async (event) => {
       },
     });
   } catch (e) {
-    setError(String(e));
+    await showBroadcastFailure(e);
     return;
   } finally {
     hideLoading();
@@ -4066,6 +4409,11 @@ el.btnPegin.addEventListener("click", async () => {
       "Combined fees are at least half of the amount you are moving. You can still proceed if this is intentional.",
     );
   }
+  if (preview.creates_change && selected_outpoints?.length) {
+    warnings.push(
+      "This selection creates a change output on the public chain, which can link the history of the coins you selected.",
+    );
+  }
   let readLabel = () => "";
   const confirmed = await openConfirm({
     title: "Move funds to private",
@@ -4116,7 +4464,7 @@ el.btnPegin.addEventListener("click", async () => {
       },
     });
   } catch (e) {
-    setError(String(e));
+    await showBroadcastFailure(e);
     return;
   } finally {
     hideLoading();
@@ -4224,7 +4572,7 @@ el.btnMwebSend.addEventListener("click", async () => {
       },
     });
   } catch (e) {
-    setError(String(e));
+    await showBroadcastFailure(e);
     return;
   } finally {
     hideLoading();
@@ -4327,7 +4675,7 @@ el.btnPegout.addEventListener("click", async () => {
       },
     });
   } catch (e) {
-    setError(String(e));
+    await showBroadcastFailure(e);
     return;
   } finally {
     hideLoading();
@@ -4352,6 +4700,52 @@ el.btnPegout.addEventListener("click", async () => {
     ],
     copy: { value: result.wtxid, label: "Copy ID", toast: "Kernel ID copied." },
   });
+});
+
+
+el.btnRefreshCoins.addEventListener("click", () => void refreshUtxos());
+
+el.btnTestElectrum.addEventListener("click", async () => {
+  el.electrumTestResult.textContent = "Testing…";
+  try {
+    // Persist TLS toggle for the probe by saving is not required — probe uses stored settings.
+    // Use the URL currently typed in the field.
+    const probe = await invoke<ElectrumProbe>("test_electrum", {
+      url: el.settingsElectrum.value.trim() || null,
+    });
+    el.electrumTestResult.textContent = `OK · tip ${probe.tip_height.toLocaleString(
+      "en-US",
+    )} · ${probe.latency_ms} ms · ${electrumHostLabel(probe.url)}`;
+    lastElectrumUrl = probe.url;
+    updateStatusStrip({ tip: probe.tip_height, electrumUrl: probe.url });
+  } catch (e) {
+    el.electrumTestResult.textContent = String(e);
+  }
+});
+
+el.btnExportMetadata.addEventListener("click", async () => {
+  try {
+    const path = await invoke<string | null>("export_metadata");
+    if (path) setStatus(`Metadata exported to ${path}`, "success");
+  } catch (e) {
+    setError(String(e));
+  }
+});
+
+el.btnImportMetadata.addEventListener("click", async () => {
+  try {
+    const result = await invoke<MetadataImportResult | null>("import_metadata");
+    if (!result) return;
+    await refreshContacts();
+    await refreshTxLabels();
+    await refreshUtxos();
+    setStatus(
+      `Imported ${result.contacts_upserted} contacts, ${result.tx_labels_upserted} tx labels, ${result.utxo_labels_upserted} coin labels.`,
+      "success",
+    );
+  } catch (e) {
+    setError(String(e));
+  }
 });
 
 displayUnit = readDisplayUnit();

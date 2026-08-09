@@ -56,16 +56,26 @@ trusting it.
 
 ## 3. Check the macOS signature (signed releases)
 
-Once releases are signed and notarized:
+CI signs and notarizes macOS artifacts automatically when Apple Developer
+secrets are configured (see [`NOTARIZATION.md`](NOTARIZATION.md)). Draft release
+notes state whether that run was signed or unsigned.
+
+**Signed / notarized** builds:
 
 ```bash
 codesign -dv --verbose=4 "/Applications/LTC Wallet.app"   # identity + team ID
 spctl -a -vv "/Applications/LTC Wallet.app"               # Gatekeeper / notarization
 ```
 
-Unsigned builds (the current state — the release notes say which) fail these
-checks and require clearing the quarantine flag; that is exactly the trust gap
-signing closes, so prefer building from source until releases are signed.
+Expect `Developer ID Application` and `accepted` from `spctl`.
+
+**Unsigned** builds fail these checks. That is expected when repository secrets
+are absent. Clear quarantine once, then prefer building from source or waiting
+for a signed release:
+
+```bash
+xattr -cr "/Applications/LTC Wallet.app"
+```
 
 ## 4. Cross-check the dependency pins
 
@@ -136,5 +146,6 @@ future work in `docs/AUDIT_NOTES.md`.
 
 - No third-party audit has been performed. `docs/AUDIT_NOTES.md` holds the
   internal review findings and the intended scope for an external audit.
-- macOS artifacts are unsigned until Apple credentials are configured.
+- macOS artifacts remain unsigned on any release built without Apple
+  credentials in CI ([`NOTARIZATION.md`](NOTARIZATION.md)).
 - Bit-for-bit reproducible builds (see caveat above).

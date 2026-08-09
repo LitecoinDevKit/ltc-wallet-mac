@@ -119,6 +119,54 @@ pub(crate) fn humanize_broadcast_error(raw: &str) -> String {
     }
 }
 
+/// Which recovery path the UI should emphasize for a broadcast failure.
+///
+/// Kept in lockstep with `classifyBroadcastFailure` in `ui/src/main.ts` (tests
+/// assert the Rust mapping; the UI classifies locally to avoid an extra IPC hop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum BroadcastFailureKind {
+    /// MWEB payload needs litecoind RPC / MWEB peers (Electrum cannot decode).
+    NeedsRpc,
+    MempoolConflict,
+    AlreadyKnown,
+    FeeTooLow,
+    SpentOrMissing,
+    Other,
+}
+
+/// Classify a (possibly humanized) broadcast error for recovery CTAs.
+#[allow(dead_code)]
+pub fn classify_broadcast_failure(message: &str) -> BroadcastFailureKind {
+    let lower = message.to_lowercase();
+    if lower.contains("configure a litecoin rpc")
+        || lower.contains("mweb p2p")
+        || lower.contains("could not reach any mweb peer")
+        || lower.contains("decode failed")
+        || (lower.contains("could not read this transaction") && lower.contains("mweb"))
+    {
+        BroadcastFailureKind::NeedsRpc
+    } else if lower.contains("mempool-conflict") || lower.contains("conflicts with another")
+    {
+        BroadcastFailureKind::MempoolConflict
+    } else if lower.contains("already broadcast")
+        || lower.contains("already known")
+        || lower.contains("already in block")
+    {
+        BroadcastFailureKind::AlreadyKnown
+    } else if lower.contains("fee is too low") || lower.contains("insufficient fee") {
+        BroadcastFailureKind::FeeTooLow
+    } else if lower.contains("already been spent")
+        || lower.contains("unknown to the network")
+        || lower.contains("missing inputs")
+    {
+        BroadcastFailureKind::SpentOrMissing
+    } else {
+        BroadcastFailureKind::Other
+    }
+}
+
 /// Strip machine noise from a server rejection: unwrap the `message` field of
 /// an embedded JSON-RPC error object, drop raw transaction hex dumps, and
 /// collapse whitespace.
@@ -162,5 +210,16 @@ mod tests {
     fn unknown_errors_pass_through_cleaned() {
         let msg = humanize_broadcast_error("something   odd\nhappened");
         assert_eq!(msg, "something odd happened");
+    }
+
+    #[test]
+    fn classifies_mweb_rpc_need() {
+        let msg = humanize_broadcast_error(
+            r#"{"code":1,"message":"TX decode failed\n[0200]"}"#,
+        );
+        assert_eq!(
+            classify_broadcast_failure(&msg),
+            BroadcastFailureKind::NeedsRpc
+        );
     }
 }

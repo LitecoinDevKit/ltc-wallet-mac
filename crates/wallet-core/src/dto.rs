@@ -121,6 +121,9 @@ pub struct UtxoRecord {
     pub confirmations: u32,
     /// Frozen coins are skipped by automatic coin selection.
     pub locked: bool,
+    /// Optional local note (non-secret sidecar).
+    #[serde(default)]
+    pub label: String,
 }
 
 /// Freeze or unfreeze a transparent UTXO.
@@ -129,6 +132,13 @@ pub struct SetUtxoLockedRequest {
     /// `txid:vout`
     pub outpoint: String,
     pub locked: bool,
+}
+
+/// Set or clear a local UTXO label (`txid:vout`). Empty label deletes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetUtxoLabelRequest {
+    pub outpoint: String,
+    pub label: String,
 }
 
 /// Result of a broadcast send.
@@ -145,6 +155,9 @@ pub struct SendPreview {
     pub amount_sats: u64,
     pub fee_sats: u64,
     pub fee_rate_sat_vb: u64,
+    /// True when the built transaction creates a change output (privacy merge risk).
+    #[serde(default)]
+    pub creates_change: bool,
 }
 
 /// Network fee-rate estimate.
@@ -428,6 +441,18 @@ pub struct PeginPreview {
     pub transparent_fee_sats: u64,
     /// Total transparent spend: peg-in amount + transparent fee.
     pub total_from_transparent_sats: u64,
+    /// True when manual coin selection likely leaves transparent change.
+    #[serde(default)]
+    pub creates_change: bool,
+}
+
+/// Result of probing an Electrum server (Settings “Test connection”).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ElectrumProbe {
+    pub url: String,
+    pub tip_height: u32,
+    /// Round-trip time for connect + handshake + tip subscribe, milliseconds.
+    pub latency_ms: u64,
 }
 
 /// Result of a peg-in broadcast.

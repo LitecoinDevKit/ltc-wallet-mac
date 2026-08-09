@@ -124,4 +124,6 @@ their download against it (see [`docs/VERIFYING.md`](docs/VERIFYING.md)).
 
 ## Next step
 
-Polish MWEB UX against a live archive peer + RPC; then notarized distribution.
+Run the live MWEB product checklist ([`docs/MWEB_E2E.md`](docs/MWEB_E2E.md))
+against an archive peer + RPC, then ship a notarized macOS build when Apple
+secrets are configured ([`docs/NOTARIZATION.md`](docs/NOTARIZATION.md)).

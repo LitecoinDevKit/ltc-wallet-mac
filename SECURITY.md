@@ -85,7 +85,8 @@ vendored dependencies.
   a wrong chain or withholding blocks, not omission of individual mempool
   transactions.
 - macOS releases are unsigned until Apple Developer credentials are set up
-  (CI is already wired to sign automatically once the secrets exist).
+  (CI is already wired to sign + notarize automatically once the secrets exist;
+  see [`docs/NOTARIZATION.md`](docs/NOTARIZATION.md)).
 - The `wipe` escape hatch intentionally works without the passphrase — it is
   the only recovery path when a passphrase is lost. It deletes data only
   (funds are recoverable from a mnemonic backup) and requires a typed
