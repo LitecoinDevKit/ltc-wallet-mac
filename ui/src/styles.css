@@ -2173,10 +2173,15 @@ textarea {
   gap: 0.4rem;
 }
 
-.fee-chip-row {
+.fee-chip-row,
+.amount-presets {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+.amount-presets {
+  margin: -0.15rem 0 0.55rem;
 }
 
 .fee-chip {

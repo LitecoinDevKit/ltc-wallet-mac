@@ -99,11 +99,12 @@ pub struct SendRequest {
     /// Fee rate in sat/vB. When omitted or zero, the wallet estimates from Electrum.
     #[serde(default)]
     pub fee_rate_sat_vb: Option<u64>,
-    /// When true, drain all spendable funds to `address` (send max).
+    /// When true, send the maximum from the spendable set (wallet-wide, or
+    /// [`Self::selected_outpoints`] when that is non-empty), minus fees.
     #[serde(default)]
     pub drain: bool,
     /// When non-empty, spend only these transparent outpoints (`txid:vout`).
-    /// Incompatible with [`Self::drain`].
+    /// Combined with [`Self::drain`], empties the selected coins (minus fees).
     #[serde(default)]
     pub selected_outpoints: Option<Vec<String>>,
 }
@@ -421,11 +422,12 @@ pub struct PeginRequest {
     /// Transparent miner fee; `0` = estimate from Electrum.
     #[serde(default)]
     pub transparent_fee_sats: u64,
-    /// Peg in all trusted-spendable transparent funds (minus transparent fee).
+    /// Peg in the maximum from the spendable set (wallet-wide, or
+    /// [`Self::selected_outpoints`] when that is non-empty), minus transparent fee.
     #[serde(default)]
     pub drain: bool,
     /// When non-empty, fund the peg-in from only these transparent outpoints (`txid:vout`).
-    /// Incompatible with [`Self::drain`].
+    /// Combined with [`Self::drain`], empties the selected coins (minus fees).
     #[serde(default)]
     pub selected_outpoints: Option<Vec<String>>,
 }

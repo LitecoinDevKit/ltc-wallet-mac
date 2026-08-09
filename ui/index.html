@@ -503,15 +503,24 @@
                           autocomplete="off"
                         />
                       </label>
-                      <label class="check">
-                        <input id="send-drain" type="checkbox" />
-                        <span>Send all — empty the public balance</span>
-                      </label>
+                      <div
+                        class="amount-presets"
+                        id="send-amount-presets"
+                        role="group"
+                        aria-label="Amount presets"
+                      >
+                        <button type="button" class="fee-chip amount-preset" data-pct="25">25%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="50">50%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="75">75%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="max">Max</button>
+                      </div>
+                      <input id="send-drain" type="checkbox" hidden />
                       <details class="coin-control" id="coin-control">
                         <summary>Choose coins (advanced)</summary>
                         <p class="hint">
-                          Optional. Pick which public coins to spend. Frozen coins are skipped by
-                          automatic selection. Not available with Send all.
+                          Optional. Pick which public coins to spend. Percentage chips then apply to
+                          the selected total; Max empties those coins (minus fees). Frozen coins are
+                          skipped by automatic selection.
                         </p>
                         <p class="hint mono" id="coin-control-sum" hidden></p>
                         <ul id="utxo-list" class="utxo-list"></ul>
@@ -535,6 +544,18 @@
                           />
                         </label>
                       </div>
+                      <label class="field">
+                        <span class="field-label">Note (optional)</span>
+                        <input
+                          id="send-note"
+                          type="text"
+                          maxlength="140"
+                          autocomplete="off"
+                          spellcheck="true"
+                          placeholder="e.g. rent, exchange withdrawal"
+                        />
+                        <span class="hint">Saved only on this device — never broadcast.</span>
+                      </label>
                       <p class="hint" id="send-fee-hint">Network fee is calculated automatically.</p>
                       <div class="row">
                         <button type="submit" id="btn-send" class="btn btn-primary">Review and send</button>
@@ -564,9 +585,29 @@
                         <span class="field-label" id="mweb-send-amount-label">Amount (LTC)</span>
                         <input id="mweb-send-amount" type="text" inputmode="decimal" placeholder="0.001" />
                       </label>
-                      <label class="check">
-                        <input id="mweb-send-drain" type="checkbox" />
-                        <span>Send all — empty the private balance</span>
+                      <div
+                        class="amount-presets"
+                        id="mweb-send-amount-presets"
+                        role="group"
+                        aria-label="Private amount presets"
+                      >
+                        <button type="button" class="fee-chip amount-preset" data-pct="25">25%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="50">50%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="75">75%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="max">Max</button>
+                      </div>
+                      <input id="mweb-send-drain" type="checkbox" hidden />
+                      <label class="field">
+                        <span class="field-label">Note (optional)</span>
+                        <input
+                          id="mweb-send-note"
+                          type="text"
+                          maxlength="140"
+                          autocomplete="off"
+                          spellcheck="true"
+                          placeholder="e.g. rent, exchange withdrawal"
+                        />
+                        <span class="hint">Saved only on this device — never broadcast.</span>
                       </label>
                       <p class="hint">Private network fee is calculated automatically.</p>
                       <div class="row">
@@ -724,15 +765,24 @@
                         <span class="field-label" id="pegin-amount-label">Amount (LTC)</span>
                         <input id="pegin-amount" type="text" inputmode="decimal" placeholder="0.001" />
                       </label>
-                      <label class="check">
-                        <input id="pegin-drain" type="checkbox" />
-                        <span>Move all public funds</span>
-                      </label>
+                      <div
+                        class="amount-presets"
+                        id="pegin-amount-presets"
+                        role="group"
+                        aria-label="Peg-in amount presets"
+                      >
+                        <button type="button" class="fee-chip amount-preset" data-pct="25">25%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="50">50%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="75">75%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="max">Max</button>
+                      </div>
+                      <input id="pegin-drain" type="checkbox" hidden />
                       <details class="coin-control" id="pegin-coin-control">
                         <summary>Choose coins (advanced)</summary>
                         <p class="hint">
-                          Optional. Pick which public coins to peg in. Frozen coins are skipped by
-                          automatic selection. Not available with Move all.
+                          Optional. Pick which public coins to peg in. Percentage chips then apply to
+                          the selected total; Max empties those coins (minus fees). Frozen coins are
+                          skipped by automatic selection.
                         </p>
                         <p class="hint mono" id="pegin-coin-control-sum" hidden></p>
                         <ul id="pegin-utxo-list" class="utxo-list"></ul>
@@ -741,6 +791,18 @@
                           Refresh coins
                         </button>
                       </details>
+                      <label class="field">
+                        <span class="field-label">Note (optional)</span>
+                        <input
+                          id="pegin-note"
+                          type="text"
+                          maxlength="140"
+                          autocomplete="off"
+                          spellcheck="true"
+                          placeholder="e.g. move to private"
+                        />
+                        <span class="hint">Saved only on this device — never broadcast.</span>
+                      </label>
                       <p class="hint">
                         Two fees apply: a miner fee on the public chain, and a private network fee on
                         MWEB. Both are calculated automatically.
@@ -760,9 +822,29 @@
                         <span class="field-label" id="pegout-amount-label">Amount (LTC)</span>
                         <input id="pegout-amount" type="text" inputmode="decimal" placeholder="0.001" />
                       </label>
-                      <label class="check">
-                        <input id="pegout-drain" type="checkbox" />
-                        <span>Move all private funds</span>
+                      <div
+                        class="amount-presets"
+                        id="pegout-amount-presets"
+                        role="group"
+                        aria-label="Peg-out amount presets"
+                      >
+                        <button type="button" class="fee-chip amount-preset" data-pct="25">25%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="50">50%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="75">75%</button>
+                        <button type="button" class="fee-chip amount-preset" data-pct="max">Max</button>
+                      </div>
+                      <input id="pegout-drain" type="checkbox" hidden />
+                      <label class="field">
+                        <span class="field-label">Note (optional)</span>
+                        <input
+                          id="pegout-note"
+                          type="text"
+                          maxlength="140"
+                          autocomplete="off"
+                          spellcheck="true"
+                          placeholder="e.g. move to public"
+                        />
+                        <span class="hint">Saved only on this device — never broadcast.</span>
                       </label>
                       <p class="hint">Fee is automatic; amount stays above the dust limit.</p>
                       <div class="row">

@@ -340,7 +340,7 @@ fn contacts_round_trip_and_wipe() {
 }
 
 #[test]
-fn pegin_manual_selection_rejects_drain_and_unknown_outpoint() {
+fn pegin_manual_selection_rejects_unknown_outpoint() {
     use wallet_core::PeginRequest;
 
     let dir = tempdir().unwrap();
@@ -353,22 +353,6 @@ fn pegin_manual_selection_rejects_drain_and_unknown_outpoint() {
         },
     )
     .unwrap();
-
-    let drain_err = app
-        .preview_pegin(PeginRequest {
-            amount_sats: 0,
-            mweb_fee_sats: 0,
-            transparent_fee_sats: 500,
-            drain: true,
-            selected_outpoints: Some(vec![
-                "0000000000000000000000000000000000000000000000000000000000000000:0".into(),
-            ]),
-        })
-        .expect_err("drain + selection");
-    assert!(
-        drain_err.to_string().contains("Move all"),
-        "got {drain_err}"
-    );
 
     let unknown_err = app
         .preview_pegin(PeginRequest {
@@ -384,6 +368,23 @@ fn pegin_manual_selection_rejects_drain_and_unknown_outpoint() {
     assert!(
         unknown_err.to_string().contains("not an unspent"),
         "got {unknown_err}"
+    );
+
+    // Drain + selection is allowed (100% of selected coins); unknown outpoint still fails.
+    let drain_unknown = app
+        .preview_pegin(PeginRequest {
+            amount_sats: 0,
+            mweb_fee_sats: 0,
+            transparent_fee_sats: 500,
+            drain: true,
+            selected_outpoints: Some(vec![
+                "0000000000000000000000000000000000000000000000000000000000000000:0".into(),
+            ]),
+        })
+        .expect_err("unknown outpoint with drain");
+    assert!(
+        drain_unknown.to_string().contains("not an unspent"),
+        "got {drain_unknown}"
     );
 }
 
@@ -403,7 +404,7 @@ fn list_unspent_empty_on_new_wallet() {
 }
 
 #[test]
-fn manual_selection_rejects_drain_and_unknown_outpoint() {
+fn manual_selection_rejects_unknown_outpoint() {
     let dir = tempdir().unwrap();
     let app = with_secrets(Arc::new(MemoryStore::new()));
     app.create(
@@ -416,25 +417,9 @@ fn manual_selection_rejects_drain_and_unknown_outpoint() {
     .unwrap();
     let address = app.receive_address().unwrap();
 
-    let drain_err = app
-        .send(SendRequest {
-            address: address.clone(),
-            amount_sats: 0,
-            fee_rate_sat_vb: Some(1),
-            drain: true,
-            selected_outpoints: Some(vec![
-                "0000000000000000000000000000000000000000000000000000000000000000:0".into(),
-            ]),
-        })
-        .expect_err("drain + selection");
-    assert!(
-        drain_err.to_string().contains("Send all"),
-        "got {drain_err}"
-    );
-
     let unknown_err = app
         .send(SendRequest {
-            address,
+            address: address.clone(),
             amount_sats: 10_000,
             fee_rate_sat_vb: Some(1),
             drain: false,
@@ -446,6 +431,23 @@ fn manual_selection_rejects_drain_and_unknown_outpoint() {
     assert!(
         unknown_err.to_string().contains("not an unspent"),
         "got {unknown_err}"
+    );
+
+    // Drain + selection is allowed (100% of selected coins); unknown outpoint still fails.
+    let drain_unknown = app
+        .send(SendRequest {
+            address,
+            amount_sats: 0,
+            fee_rate_sat_vb: Some(1),
+            drain: true,
+            selected_outpoints: Some(vec![
+                "0000000000000000000000000000000000000000000000000000000000000000:0".into(),
+            ]),
+        })
+        .expect_err("unknown outpoint with drain");
+    assert!(
+        drain_unknown.to_string().contains("not an unspent"),
+        "got {drain_unknown}"
     );
 }
 

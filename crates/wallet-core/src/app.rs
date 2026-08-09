@@ -1581,12 +1581,6 @@ fn resolve_pegin_request(
         .transpose()?
         .filter(|v| !v.is_empty());
 
-    if selected.is_some() && req.drain {
-        return Err(WalletError::BuildTx(
-            "manual coin selection cannot be used with Move all — turn off Move all first".into(),
-        ));
-    }
-
     let spendable = if let Some(ref outpoints) = selected {
         let mut sum = 0u64;
         for op in outpoints {
@@ -1608,6 +1602,7 @@ fn resolve_pegin_request(
     };
 
     let amount_sats = if req.drain {
+        // Drain of a manual selection empties those coins; otherwise the wallet.
         spendable.checked_sub(transparent_fee_sats).ok_or_else(|| {
             WalletError::BuildTx(format!(
                 "not enough transparent funds to peg in after a ~{} litoshis miner fee",
@@ -1621,7 +1616,7 @@ fn resolve_pegin_request(
         if needed > spendable {
             return Err(WalletError::BuildTx(format!(
                 "swapping {} litoshis needs {} litoshis with the ~{} litoshis miner fee, but only {} \
-                 litoshis are spendable — lower the amount or use \"Move all public funds\"",
+                 litoshis are spendable — lower the amount or use Max",
                 req.amount_sats, needed, transparent_fee_sats, spendable
             )));
         }
@@ -1796,12 +1791,6 @@ fn build_send_psbt(
         .transpose()?
         .filter(|v| !v.is_empty());
 
-    if selected.is_some() && req.drain {
-        return Err(WalletError::BuildTx(
-            "manual coin selection cannot be used with Send all — turn off Send all first".into(),
-        ));
-    }
-
     if let Some(ref outpoints) = selected {
         for op in outpoints {
             if state.wallet.get_utxo(*op).is_none() {
@@ -1826,7 +1815,10 @@ fn build_send_psbt(
     }
 
     if req.drain {
-        tx_builder.drain_wallet();
+        // With a manual selection, drain only those UTXOs (no drain_wallet).
+        if selected.is_none() {
+            tx_builder.drain_wallet();
+        }
         tx_builder.drain_to(recipient_script.clone());
     } else {
         let amount = Amount::from_sat(req.amount_sats);

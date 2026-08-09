@@ -405,6 +405,8 @@ const el = {
   contactsEmpty: document.querySelector<HTMLElement>("#contacts-empty")!,
   btnContactAdd: document.querySelector<HTMLButtonElement>("#btn-contact-add")!,
   sendAmount: document.querySelector<HTMLInputElement>("#send-amount")!,
+  sendAmountPresets: document.querySelector<HTMLElement>("#send-amount-presets")!,
+  sendNote: document.querySelector<HTMLInputElement>("#send-note")!,
   sendDrain: document.querySelector<HTMLInputElement>("#send-drain")!,
   coinControl: document.querySelector<HTMLDetailsElement>("#coin-control")!,
   coinControlSum: document.querySelector<HTMLElement>("#coin-control-sum")!,
@@ -440,11 +442,17 @@ const el = {
   settingsPeers: document.querySelector<HTMLInputElement>("#settings-peers")!,
   settingsMwebScheme: document.querySelector<HTMLSelectElement>("#settings-mweb-scheme")!,
   peginAmount: document.querySelector<HTMLInputElement>("#pegin-amount")!,
+  peginAmountPresets: document.querySelector<HTMLElement>("#pegin-amount-presets")!,
+  peginNote: document.querySelector<HTMLInputElement>("#pegin-note")!,
   peginDrain: document.querySelector<HTMLInputElement>("#pegin-drain")!,
   mwebSendAddress: document.querySelector<HTMLInputElement>("#mweb-send-address")!,
   mwebSendAmount: document.querySelector<HTMLInputElement>("#mweb-send-amount")!,
+  mwebSendAmountPresets: document.querySelector<HTMLElement>("#mweb-send-amount-presets")!,
+  mwebSendNote: document.querySelector<HTMLInputElement>("#mweb-send-note")!,
   mwebSendDrain: document.querySelector<HTMLInputElement>("#mweb-send-drain")!,
   pegoutAmount: document.querySelector<HTMLInputElement>("#pegout-amount")!,
+  pegoutAmountPresets: document.querySelector<HTMLElement>("#pegout-amount-presets")!,
+  pegoutNote: document.querySelector<HTMLInputElement>("#pegout-note")!,
   pegoutDrain: document.querySelector<HTMLInputElement>("#pegout-drain")!,
   btnCreate: document.querySelector<HTMLButtonElement>("#btn-create")!,
   btnRestore: document.querySelector<HTMLButtonElement>("#btn-restore")!,
@@ -899,6 +907,10 @@ function setDisplayUnit(unit: DisplayUnit, opts: { clearAmbiguous?: boolean; kee
       // Value typed for the other unit is ambiguous — clear rather than mis-parse.
       input.value = "";
     }
+    clearSendAmountPreset();
+    clearMwebSendAmountPreset();
+    clearPeginAmountPreset();
+    clearPegoutAmountPreset();
   }
   refreshBalanceDisplays();
   void refreshPublicReceiveQr();
@@ -1331,6 +1343,10 @@ function appendConfirmDestination(host: HTMLElement, address: string, badge: str
   host.appendChild(box);
 }
 
+function readNoteInput(input: HTMLInputElement): string {
+  return input.value.trim().slice(0, MAX_TX_LABEL_CHARS);
+}
+
 /** Append optional note field; returns a getter for the trimmed label. */
 function appendTxLabelField(body: HTMLElement, initial = ""): () => string {
   const field = document.createElement("label");
@@ -1342,9 +1358,12 @@ function appendTxLabelField(body: HTMLElement, initial = ""): () => string {
   input.type = "text";
   input.maxLength = MAX_TX_LABEL_CHARS;
   input.placeholder = "e.g. rent, exchange withdrawal";
-  input.value = initial;
+  input.value = initial.slice(0, MAX_TX_LABEL_CHARS);
   input.spellcheck = true;
-  field.append(caption, input);
+  const hint = document.createElement("span");
+  hint.className = "hint";
+  hint.textContent = "Saved only on this device — never broadcast.";
+  field.append(caption, input, hint);
   body.appendChild(field);
   return () => input.value.trim().slice(0, MAX_TX_LABEL_CHARS);
 }
@@ -1421,6 +1440,32 @@ function electrumHostLabel(url: string | null | undefined): string {
   }
 }
 
+/** Short MWEB strip label — full detail stays on the MWEB sync card. */
+function formatMwebStripStatus(
+  mwebStatus: string,
+  mwebHeight: number | null,
+  mwebStale: boolean,
+  tip: number | null,
+): string {
+  const lower = mwebStatus.toLowerCase();
+  if (!mwebStatus && mwebHeight == null) return "MWEB · idle";
+  if (lower.includes("unavailable") || lower.includes("error") || lower.includes("failed")) {
+    // Keep the first clause only (drop trailing leafset chatter).
+    const short = mwebStatus.split(" · ")[0]?.trim() || mwebStatus;
+    return `MWEB · ${short}`;
+  }
+  if (mwebHeight == null) return "MWEB · not synced";
+
+  const peerMatch = mwebStatus.match(/leafset confirmed by (\d+) peers?/i);
+  const peersPart = peerMatch ? ` · ${peerMatch[1]} peers` : "";
+  const stalePart = mwebStale ? " · stale" : "";
+  // When MWEB matches the transparent tip, don't repeat the height.
+  if (tip != null && mwebHeight === tip && !mwebStale) {
+    return `MWEB · synced${peersPart}`;
+  }
+  return `MWEB · synced ${mwebHeight.toLocaleString("en-US")}${stalePart}${peersPart}`;
+}
+
 function updateStatusStrip(opts?: {
   tip?: number | null;
   electrumUrl?: string | null;
@@ -1444,11 +1489,12 @@ function updateStatusStrip(opts?: {
   const showMweb = Boolean(lastCombined) || Boolean(mwebStatus);
   el.statusMweb.hidden = !showMweb;
   if (showMweb) {
-    const heightPart =
-      mwebHeight != null ? `synced ${mwebHeight.toLocaleString("en-US")}` : "not synced";
-    const stalePart = mwebStale ? " · stale" : "";
-    const detail = mwebStatus ? ` — ${mwebStatus}` : "";
-    el.statusMweb.textContent = `MWEB · ${heightPart}${stalePart}${detail}`;
+    el.statusMweb.textContent = formatMwebStripStatus(
+      mwebStatus,
+      mwebHeight,
+      mwebStale,
+      tip,
+    );
   }
 }
 
@@ -1722,7 +1768,6 @@ function flashLabel(btn: HTMLButtonElement, text: string) {
 
 function updateBusyUi() {
   const busy = syncing || sending;
-  const drain = el.sendDrain.checked;
   el.btnSync.disabled = busy;
   el.btnAddress.disabled = busy;
   el.btnCopy.disabled = busy;
@@ -1742,10 +1787,24 @@ function updateBusyUi() {
   el.btnRestore.disabled = busy || !restorePassOk || !el.restoreMnemonic.value.trim();
   el.btnMigrate.disabled = busy || !migratePassOk;
   el.sendAddress.disabled = busy;
-  el.sendAmount.disabled = busy || drain;
-  el.peginAmount.disabled = busy || el.peginDrain.checked;
-  el.mwebSendAmount.disabled = busy || el.mwebSendDrain.checked;
-  el.pegoutAmount.disabled = busy || el.pegoutDrain.checked;
+  el.sendAmount.disabled = busy;
+  el.sendNote.disabled = busy;
+  el.peginAmount.disabled = busy;
+  el.peginNote.disabled = busy;
+  el.mwebSendAmount.disabled = busy;
+  el.mwebSendNote.disabled = busy;
+  el.pegoutAmount.disabled = busy;
+  el.pegoutNote.disabled = busy;
+  for (const group of [
+    el.sendAmountPresets,
+    el.mwebSendAmountPresets,
+    el.peginAmountPresets,
+    el.pegoutAmountPresets,
+  ]) {
+    for (const btn of group.querySelectorAll<HTMLButtonElement>("button")) {
+      btn.disabled = busy;
+    }
+  }
   el.btnPegin.disabled = busy;
   el.btnMwebSend.disabled = busy;
   el.btnPegout.disabled = busy;
@@ -3750,7 +3809,7 @@ function tryParseSendPaymentUri(raw: string): boolean {
   el.sendAddress.value = parsed.address;
   if (parsed.amountSats != null) {
     el.sendAmount.value = formatAmountInput(parsed.amountSats);
-    el.sendDrain.checked = false;
+    clearSendAmountPreset();
   }
   setStatus("Parsed payment request.", "success");
   updateBusyUi();
@@ -3913,8 +3972,25 @@ type CoinControlPanel = {
 };
 
 function selectedOutpointsFor(panel: CoinControlPanel): string[] | undefined {
-  if (panel.drain.checked || panel.selected.size === 0) return undefined;
+  if (panel.selected.size === 0) return undefined;
   return Array.from(panel.selected);
+}
+
+type AmountPreset = number | "max";
+
+function parseAmountPreset(raw: string | undefined): AmountPreset | null {
+  if (!raw) return null;
+  if (raw === "max") return "max";
+  const pct = Number(raw);
+  if (!Number.isFinite(pct) || pct <= 0 || pct >= 100) return null;
+  return pct;
+}
+
+function pressedAmountPreset(group: HTMLElement): AmountPreset | null {
+  const pressed = group.querySelector<HTMLButtonElement>(
+    'button[data-pct][aria-pressed="true"]',
+  );
+  return parseAmountPreset(pressed?.dataset.pct);
 }
 
 function updateCoinControlSum(panel: CoinControlPanel) {
@@ -3942,12 +4018,20 @@ function renderUtxoList(panel: CoinControlPanel) {
 
     const check = document.createElement("input");
     check.type = "checkbox";
-    check.disabled = utxo.locked || panel.drain.checked;
+    check.disabled = utxo.locked;
     check.checked = panel.selected.has(utxo.outpoint);
     check.addEventListener("change", () => {
       if (check.checked) panel.selected.add(utxo.outpoint);
       else panel.selected.delete(utxo.outpoint);
       updateCoinControlSum(panel);
+      // Keep percentage / Max chips in sync with the selected total.
+      if (panel === sendCoinPanel) {
+        const preset = pressedAmountPreset(el.sendAmountPresets);
+        if (preset != null) applySendAmountPreset(preset);
+      } else if (panel === peginCoinPanel) {
+        const preset = pressedAmountPreset(el.peginAmountPresets);
+        if (preset != null) applyPeginAmountPreset(preset);
+      }
     });
 
     const main = document.createElement("div");
@@ -4115,20 +4199,171 @@ el.peginCoinControl.addEventListener("toggle", () => {
 el.btnRefreshUtxos.addEventListener("click", () => void refreshUtxos());
 el.btnRefreshPeginUtxos.addEventListener("click", () => void refreshUtxos());
 
-el.sendDrain.addEventListener("change", () => {
-  if (el.sendDrain.checked) sendSelectedOutpoints.clear();
-  renderUtxoList(sendCoinPanel);
+function selectedUtxoSum(selected: Set<string>): number {
+  if (selected.size === 0 || utxoCache.length === 0) return 0;
+  let sum = 0;
+  for (const utxo of utxoCache) {
+    if (selected.has(utxo.outpoint)) sum += utxo.amount_sats;
+  }
+  return sum;
+}
+
+function publicSpendableSats(selected: Set<string> = sendSelectedOutpoints): number {
+  const selectedSum = selectedUtxoSum(selected);
+  if (selectedSum > 0) return selectedSum;
+  return lastSummary?.confirmed_sats ?? 0;
+}
+
+function privateSpendableSats(): number {
+  return lastCombined?.mweb_confirmed_sats ?? 0;
+}
+
+function setAmountPresetPressed(group: HTMLElement, preset: AmountPreset | null) {
+  for (const btn of group.querySelectorAll<HTMLButtonElement>("button[data-pct]")) {
+    const value = parseAmountPreset(btn.dataset.pct);
+    btn.setAttribute(
+      "aria-pressed",
+      preset != null && value === preset ? "true" : "false",
+    );
+  }
+}
+
+function clearSendAmountPreset() {
+  if (el.sendDrain.checked) {
+    el.sendDrain.checked = false;
+    renderUtxoList(sendCoinPanel);
+  }
+  setAmountPresetPressed(el.sendAmountPresets, null);
+}
+
+function clearMwebSendAmountPreset() {
+  el.mwebSendDrain.checked = false;
+  setAmountPresetPressed(el.mwebSendAmountPresets, null);
+}
+
+function clearPeginAmountPreset() {
+  if (el.peginDrain.checked) {
+    el.peginDrain.checked = false;
+    renderUtxoList(peginCoinPanel);
+  }
+  setAmountPresetPressed(el.peginAmountPresets, null);
+}
+
+function clearPegoutAmountPreset() {
+  el.pegoutDrain.checked = false;
+  setAmountPresetPressed(el.pegoutAmountPresets, null);
+}
+
+function applyAmountPreset(opts: {
+  balance: number;
+  emptyError: string;
+  amountInput: HTMLInputElement;
+  drainInput: HTMLInputElement;
+  presetGroup: HTMLElement;
+  preset: AmountPreset;
+}) {
+  if (opts.balance <= 0) {
+    setError(opts.emptyError);
+    return;
+  }
+  if (opts.preset === "max") {
+    // Show the full spendable balance; drain on submit so fees are covered.
+    opts.amountInput.value = formatAmountInput(opts.balance);
+    opts.drainInput.checked = true;
+  } else {
+    const amountSats = Math.floor((opts.balance * opts.preset) / 100);
+    if (amountSats <= 0) {
+      setError("That percentage is too small for the current balance.");
+      return;
+    }
+    opts.amountInput.value = formatAmountInput(amountSats);
+    opts.drainInput.checked = false;
+  }
+  setAmountPresetPressed(opts.presetGroup, opts.preset);
+  updateBusyUi();
+}
+
+function applySendAmountPreset(preset: AmountPreset) {
+  applyAmountPreset({
+    balance: publicSpendableSats(sendSelectedOutpoints),
+    emptyError:
+      sendSelectedOutpoints.size > 0
+        ? "Selected coins total zero — pick different coins."
+        : "No spendable public balance yet.",
+    amountInput: el.sendAmount,
+    drainInput: el.sendDrain,
+    presetGroup: el.sendAmountPresets,
+    preset,
+  });
+}
+
+function applyMwebSendAmountPreset(preset: AmountPreset) {
+  applyAmountPreset({
+    balance: privateSpendableSats(),
+    emptyError: "No spendable private balance yet.",
+    amountInput: el.mwebSendAmount,
+    drainInput: el.mwebSendDrain,
+    presetGroup: el.mwebSendAmountPresets,
+    preset,
+  });
+}
+
+function applyPeginAmountPreset(preset: AmountPreset) {
+  applyAmountPreset({
+    balance: publicSpendableSats(peginSelectedOutpoints),
+    emptyError:
+      peginSelectedOutpoints.size > 0
+        ? "Selected coins total zero — pick different coins."
+        : "No spendable public balance yet.",
+    amountInput: el.peginAmount,
+    drainInput: el.peginDrain,
+    presetGroup: el.peginAmountPresets,
+    preset,
+  });
+}
+
+function applyPegoutAmountPreset(preset: AmountPreset) {
+  applyAmountPreset({
+    balance: privateSpendableSats(),
+    emptyError: "No spendable private balance yet.",
+    amountInput: el.pegoutAmount,
+    drainInput: el.pegoutDrain,
+    presetGroup: el.pegoutAmountPresets,
+    preset,
+  });
+}
+
+function bindAmountPresetClicks(
+  group: HTMLElement,
+  apply: (preset: AmountPreset) => void,
+) {
+  group.addEventListener("click", (event) => {
+    const btn = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-pct]");
+    if (!btn || btn.disabled) return;
+    const preset = parseAmountPreset(btn.dataset.pct);
+    if (preset == null) return;
+    apply(preset);
+  });
+}
+
+bindAmountPresetClicks(el.sendAmountPresets, applySendAmountPreset);
+bindAmountPresetClicks(el.mwebSendAmountPresets, applyMwebSendAmountPreset);
+bindAmountPresetClicks(el.peginAmountPresets, applyPeginAmountPreset);
+bindAmountPresetClicks(el.pegoutAmountPresets, applyPegoutAmountPreset);
+el.sendAmount.addEventListener("input", () => {
+  clearSendAmountPreset();
   updateBusyUi();
 });
-el.peginDrain.addEventListener("change", () => {
-  if (el.peginDrain.checked) peginSelectedOutpoints.clear();
-  renderUtxoList(peginCoinPanel);
+el.mwebSendAmount.addEventListener("input", () => {
+  clearMwebSendAmountPreset();
   updateBusyUi();
 });
-el.mwebSendDrain.addEventListener("change", () => {
+el.peginAmount.addEventListener("input", () => {
+  clearPeginAmountPreset();
   updateBusyUi();
 });
-el.pegoutDrain.addEventListener("change", () => {
+el.pegoutAmount.addEventListener("input", () => {
+  clearPegoutAmountPreset();
   updateBusyUi();
 });
 
@@ -4164,10 +4399,6 @@ el.sendForm.addEventListener("submit", async (event) => {
   }
 
   const selected_outpoints = selectedOutpointsFor(sendCoinPanel);
-  if (drain && selected_outpoints?.length) {
-    setError("Turn off Choose coins or Send all — they cannot be used together.");
-    return;
-  }
 
   sending = true;
   setError(null);
@@ -4227,15 +4458,26 @@ el.sendForm.addEventListener("submit", async (event) => {
       ["Amount", amountLabel],
       ["Network fee", formatAmountPlain(preview.fee_sats)],
       ["Total leaving wallet", formatAmountPlain(totalLeave)],
-      ...(drain ? ([["Emptying", "All transparent funds"]] as DetailRow[]) : []),
+      ...(drain
+        ? ([
+            [
+              "Emptying",
+              selected_outpoints?.length
+                ? `${selected_outpoints.length} selected coin${
+                    selected_outpoints.length === 1 ? "" : "s"
+                  }`
+                : "All transparent funds",
+            ],
+          ] as DetailRow[])
+        : []),
       ...(selected_outpoints?.length
         ? ([["Coins", `${selected_outpoints.length} selected`]] as DetailRow[])
         : []),
     ],
     detail: `Fee rate ${preview.fee_rate_sat_vb} sat/vB (${feeSource}).`,
-    confirmLabel: drain ? "Send all now" : "Send now",
+    confirmLabel: drain ? "Send max now" : "Send now",
     afterDetail: (body) => {
-      readLabel = appendTxLabelField(body, "");
+      readLabel = appendTxLabelField(body, readNoteInput(el.sendNote));
     },
   });
   if (!confirmed) {
@@ -4244,6 +4486,7 @@ el.sendForm.addEventListener("submit", async (event) => {
     return;
   }
   const pendingLabel = readLabel();
+  el.sendNote.value = pendingLabel;
 
   updateBusyUi();
   showLoading("Broadcasting transaction…");
@@ -4272,7 +4515,8 @@ el.sendForm.addEventListener("submit", async (event) => {
   await persistTxLabel(result.txid, pendingLabel);
   el.sendAddress.value = "";
   el.sendAmount.value = "";
-  el.sendDrain.checked = false;
+  el.sendNote.value = "";
+  clearSendAmountPreset();
   sendSelectedOutpoints.clear();
   el.coinControl.open = false;
   selectedFeeRateSatVb = null;
@@ -4367,10 +4611,6 @@ el.btnPegin.addEventListener("click", async () => {
   if (syncing || sending) return;
   const drain = el.peginDrain.checked;
   const selected_outpoints = selectedOutpointsFor(peginCoinPanel);
-  if (drain && selected_outpoints?.length) {
-    setError("Turn off Choose coins or Move all — they cannot be used together.");
-    return;
-  }
   let amount_sats = 0;
   if (!drain) {
     const parsed = parseAmountToSats(el.peginAmount.value);
@@ -4440,9 +4680,9 @@ el.btnPegin.addEventListener("click", async () => {
         "The miner fee pays Litecoin miners to confirm the public peg-in transaction. The private network fee is burned on MWEB when your coins are credited. Both are required for a peg-in.";
       details.append(summary, p);
       body.appendChild(details);
-      readLabel = appendTxLabelField(body, "");
+      readLabel = appendTxLabelField(body, readNoteInput(el.peginNote));
     },
-    confirmLabel: drain ? "Move all to private" : "Move to private",
+    confirmLabel: drain ? "Move max to private" : "Move to private",
   });
   if (!confirmed) {
     sending = false;
@@ -4450,6 +4690,7 @@ el.btnPegin.addEventListener("click", async () => {
     return;
   }
   const pendingLabel = readLabel();
+  el.peginNote.value = pendingLabel;
 
   updateBusyUi();
   showLoading("Broadcasting peg-in…");
@@ -4476,7 +4717,8 @@ el.btnPegin.addEventListener("click", async () => {
   renderLastTxid();
   await persistTxLabel(result.txid, pendingLabel);
   el.peginAmount.value = "";
-  el.peginDrain.checked = false;
+  el.peginNote.value = "";
+  clearPeginAmountPreset();
   peginSelectedOutpoints.clear();
   el.peginCoinControl.open = false;
 
@@ -4548,9 +4790,9 @@ el.btnMwebSend.addEventListener("click", async () => {
       ["Network fee", formatAmountPlain(preview.fee_sats)],
       ["Total leaving private", formatAmountPlain(preview.amount_sats + preview.fee_sats)],
     ],
-    confirmLabel: drain ? "Send all private" : "Send private",
+    confirmLabel: drain ? "Send max private" : "Send private",
     afterDetail: (body) => {
-      readLabel = appendTxLabelField(body, "");
+      readLabel = appendTxLabelField(body, readNoteInput(el.mwebSendNote));
     },
   });
   if (!confirmed) {
@@ -4559,6 +4801,7 @@ el.btnMwebSend.addEventListener("click", async () => {
     return;
   }
   const pendingLabel = readLabel();
+  el.mwebSendNote.value = pendingLabel;
 
   updateBusyUi();
   showLoading("Broadcasting private send…");
@@ -4583,7 +4826,8 @@ el.btnMwebSend.addEventListener("click", async () => {
   await persistTxLabel(result.wtxid, pendingLabel);
   el.mwebSendAddress.value = "";
   el.mwebSendAmount.value = "";
-  el.mwebSendDrain.checked = false;
+  el.mwebSendNote.value = "";
+  clearMwebSendAmountPreset();
   await refreshCombined();
   await refreshHistory();
   await showResult({
@@ -4651,9 +4895,9 @@ el.btnPegout.addEventListener("click", async () => {
       ["Total leaving private", formatAmountPlain(preview.amount_sats + preview.fee_sats)],
     ],
     detail: `Destination dust floor is ${preview.dust_sats.toLocaleString("en-US")} litoshis.`,
-    confirmLabel: drain ? "Move all to public" : "Move to public",
+    confirmLabel: drain ? "Move max to public" : "Move to public",
     afterDetail: (body) => {
-      readLabel = appendTxLabelField(body, "");
+      readLabel = appendTxLabelField(body, readNoteInput(el.pegoutNote));
     },
   });
   if (!confirmed) {
@@ -4662,6 +4906,7 @@ el.btnPegout.addEventListener("click", async () => {
     return;
   }
   const pendingLabel = readLabel();
+  el.pegoutNote.value = pendingLabel;
 
   updateBusyUi();
   showLoading("Broadcasting swap…");
@@ -4685,7 +4930,8 @@ el.btnPegout.addEventListener("click", async () => {
 
   await persistTxLabel(result.wtxid, pendingLabel);
   el.pegoutAmount.value = "";
-  el.pegoutDrain.checked = false;
+  el.pegoutNote.value = "";
+  clearPegoutAmountPreset();
 
   void runSync({ quiet: false });
   await showResult({
