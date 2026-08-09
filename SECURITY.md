@@ -49,11 +49,12 @@ servers, and social engineering.
   learns your addresses and IP; DNS-discovered MWEB peers learn your IP.
   The first-party explorer ([litview.space](https://litview.space) by default,
   or a self-hosted LRK URL in Settings) learns your IP when the wallet
-  automatically fetches spot price (~60s while unlocked) or fee hints (send
-  form). It learns IP + a specific txid when you open a transaction detail
-  (enrichment) or click “View on litview” (system browser). Fiat and fee-hint
-  fetches can be disabled in Settings. Wallet address lists are never uploaded
-  to the explorer. See [`docs/LITVIEW.md`](docs/LITVIEW.md).
+  automatically fetches spot price (~60s while unlocked), fee hints (send
+  form), or Insights pulse/charts (~90s / on view). It learns IP + a specific
+  txid when you open a transaction detail (enrichment) or click “View on
+  litview” (system browser). Fiat, fee-hint, and Insights fetches can be
+  disabled in Settings. Wallet address lists are never uploaded to the
+  explorer. See [`docs/LITVIEW.md`](docs/LITVIEW.md).
 - **Colluding servers.** The post-sync cross-checks compare independent
   sources, which turns "one dishonest server can lie to you" into "two
   independent sources must collude". They compare only chain tips and MWEB

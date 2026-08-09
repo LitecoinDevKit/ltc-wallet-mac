@@ -261,6 +261,9 @@ pub struct WalletSettings {
     /// Show explorer fee-rate suggestion chips on the send form.
     #[serde(default = "default_true")]
     pub use_explorer_fee_hints: bool,
+    /// Show Insights nav / Balance network pulse (litview metrics).
+    #[serde(default = "default_true")]
+    pub insights_enabled: bool,
 }
 
 /// Request to update wallet settings.
@@ -287,6 +290,35 @@ pub struct UpdateSettingsRequest {
     pub show_fiat: bool,
     #[serde(default = "default_true")]
     pub use_explorer_fee_hints: bool,
+    #[serde(default = "default_true")]
+    pub insights_enabled: bool,
+}
+
+/// Aggregate litview network snapshot for Balance pulse / Insights header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkPulse {
+    pub tip_height: u32,
+    pub price_usd: f64,
+    pub price_change_pct: Option<f64>,
+    pub fastest_fee_sat_vb: u64,
+    pub half_hour_fee_sat_vb: u64,
+    pub mempool_tx_count: u64,
+    pub mempool_vsize: u64,
+    pub fetched_at_unix: u64,
+}
+
+/// One allowlisted litview time series for Insights charts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricSeries {
+    pub id: String,
+    pub title: String,
+    pub unit: String,
+    pub index: String,
+    pub values: Vec<f64>,
+    pub latest: Option<f64>,
+    pub change_pct: Option<f64>,
+    /// Path under the explorer base URL (e.g. `/explore`).
+    pub litview_path: String,
 }
 
 /// Whether a destination matches a previously used transparent wallet address.

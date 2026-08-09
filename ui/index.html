@@ -308,6 +308,23 @@
           </button>
           <button
             type="button"
+            id="nav-insights"
+            class="nav-item"
+            role="tab"
+            aria-controls="view-insights"
+            aria-selected="false"
+          >
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 19V5" />
+              <path d="M4 19h16" />
+              <path d="M8 15v-4" />
+              <path d="M12 15V8" />
+              <path d="M16 15v-6" />
+            </svg>
+            <span class="nav-label">Insights</span>
+          </button>
+          <button
+            type="button"
             id="nav-coins"
             class="nav-item"
             role="tab"
@@ -419,6 +436,31 @@
                     <span class="stat-value" id="balance-tip">—</span>
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  class="network-pulse"
+                  id="network-pulse"
+                  hidden
+                  aria-label="Open Insights"
+                >
+                  <span class="pulse-item">
+                    <span class="pulse-label">Price</span>
+                    <span class="pulse-value" id="pulse-price">—</span>
+                  </span>
+                  <span class="pulse-item">
+                    <span class="pulse-label">Tip</span>
+                    <span class="pulse-value" id="pulse-tip">—</span>
+                  </span>
+                  <span class="pulse-item">
+                    <span class="pulse-label">Fee</span>
+                    <span class="pulse-value" id="pulse-fee">—</span>
+                  </span>
+                  <span class="pulse-item">
+                    <span class="pulse-label">Mempool</span>
+                    <span class="pulse-value" id="pulse-mempool">—</span>
+                  </span>
+                </button>
               </div>
             </div>
 
@@ -869,6 +911,49 @@
             </div>
           </section>
 
+          <section id="view-insights" class="view view-insights" role="tabpanel" aria-labelledby="nav-insights" hidden>
+            <div class="card insights-pulse-card">
+              <div class="sheet-head">
+                <h3>Network pulse</h3>
+                <button type="button" id="btn-refresh-insights" class="btn btn-ghost btn-sm">Refresh</button>
+              </div>
+              <p class="hint">
+                Public litview metrics only — your addresses stay on this computer.
+              </p>
+              <div class="insights-pulse-grid" id="insights-pulse-grid">
+                <div class="insights-stat">
+                  <span class="stat-label">Price</span>
+                  <span class="stat-value" id="insights-price">—</span>
+                </div>
+                <div class="insights-stat">
+                  <span class="stat-label">Tip</span>
+                  <span class="stat-value" id="insights-tip">—</span>
+                </div>
+                <div class="insights-stat">
+                  <span class="stat-label">Next-block fee</span>
+                  <span class="stat-value" id="insights-fee">—</span>
+                </div>
+                <div class="insights-stat">
+                  <span class="stat-label">Mempool</span>
+                  <span class="stat-value" id="insights-mempool">—</span>
+                </div>
+              </div>
+              <p class="hint" id="insights-pulse-error" hidden></p>
+            </div>
+
+            <div class="card insights-charts-card">
+              <div class="sheet-head">
+                <h3>Charts</h3>
+                <button type="button" id="btn-open-litview" class="btn btn-ghost btn-sm">
+                  Open litview
+                </button>
+              </div>
+              <p class="hint" id="insights-charts-hint">Last 30 days · litview.space</p>
+              <div class="insights-charts" id="insights-charts" aria-busy="false"></div>
+              <p class="hint" id="insights-charts-empty" hidden></p>
+            </div>
+          </section>
+
           <section id="view-coins" class="view" role="tabpanel" aria-labelledby="nav-coins" hidden>
             <div class="card">
               <div class="sheet-head">
@@ -1034,6 +1119,18 @@
               </label>
             </div>
 
+            <div class="card" id="insights-settings-card">
+              <h3>Insights</h3>
+              <p class="hint">
+                Insights fetches public metrics from your explorer host (IP visible). Wallet
+                addresses are never uploaded.
+              </p>
+              <label class="check">
+                <input id="settings-insights-enabled" type="checkbox" checked />
+                <span>Enable Insights (pulse and charts)</span>
+              </label>
+            </div>
+
             <div class="card" id="contacts-card">
               <div class="sheet-head">
                 <h3>Contacts</h3>
@@ -1070,9 +1167,9 @@
                   <strong>MWEB peers</strong> — learn your IP (not your transparent address list).
                 </li>
                 <li>
-                  <strong>Explorer (litview)</strong> — learns your IP when fetching spot price or fee
-                  hints; IP and a specific txid when you open transaction details or click “View on
-                  litview”. Wallet address lists are never uploaded.
+                  <strong>Explorer (litview)</strong> — learns your IP when fetching spot price, fee
+                  hints, or Insights pulse/charts; IP and a specific txid when you open transaction
+                  details or click “View on litview”. Wallet address lists are never uploaded.
                 </li>
                 <li>
                   <strong>On disk</strong> — transparent wallet metadata in sqlite is plaintext.
@@ -1080,8 +1177,8 @@
                 </li>
               </ul>
               <p class="hint">
-                There is no Tor or proxy support yet. Turning off “Show LTC/USD” and fee-rate
-                suggestions above limits litview contact to actions you start (detail view or
+                There is no Tor or proxy support yet. Turning off Insights, “Show LTC/USD”, and
+                fee-rate suggestions limits litview contact to actions you start (detail view or
                 “View on litview”). This wallet does not make you anonymous on the network.
               </p>
             </div>

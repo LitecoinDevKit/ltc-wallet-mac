@@ -140,6 +140,29 @@ type WalletSettings = {
   explorer_base_url: string;
   show_fiat: boolean;
   use_explorer_fee_hints: boolean;
+  insights_enabled: boolean;
+};
+
+type NetworkPulse = {
+  tip_height: number;
+  price_usd: number;
+  price_change_pct: number | null;
+  fastest_fee_sat_vb: number;
+  half_hour_fee_sat_vb: number;
+  mempool_tx_count: number;
+  mempool_vsize: number;
+  fetched_at_unix: number;
+};
+
+type MetricSeries = {
+  id: string;
+  title: string;
+  unit: string;
+  index: string;
+  values: number[];
+  latest: number | null;
+  change_pct: number | null;
+  litview_path: string;
 };
 
 type TxIo = {
@@ -214,15 +237,18 @@ const PHASE_LABELS: Record<Phase, string> = {
 };
 
 /** Top-level panes. Send/Receive/Private are cards inside the Balance sheet. */
-const VIEWS = ["balance", "history", "coins", "settings"] as const;
+const VIEWS = ["balance", "history", "insights", "coins", "settings"] as const;
 type View = (typeof VIEWS)[number];
 
 const VIEW_TITLES: Record<View, string> = {
   balance: "Balance",
   history: "History",
+  insights: "Insights",
   coins: "Coins",
   settings: "Settings",
 };
+
+const INSIGHTS_PULSE_MS = 90_000;
 
 const CARDS = ["send", "receive", "swap"] as const;
 type Card = (typeof CARDS)[number];
@@ -305,6 +331,23 @@ const el = {
   balanceMwebDetail: document.querySelector<HTMLElement>("#balance-mweb-detail")!,
   balanceTip: document.querySelector<HTMLElement>("#balance-tip")!,
   balancePending: document.querySelector<HTMLElement>("#balance-pending")!,
+  networkPulse: document.querySelector<HTMLButtonElement>("#network-pulse")!,
+  pulsePrice: document.querySelector<HTMLElement>("#pulse-price")!,
+  pulseTip: document.querySelector<HTMLElement>("#pulse-tip")!,
+  pulseFee: document.querySelector<HTMLElement>("#pulse-fee")!,
+  pulseMempool: document.querySelector<HTMLElement>("#pulse-mempool")!,
+  insightsPulseGrid: document.querySelector<HTMLElement>("#insights-pulse-grid")!,
+  insightsPrice: document.querySelector<HTMLElement>("#insights-price")!,
+  insightsTip: document.querySelector<HTMLElement>("#insights-tip")!,
+  insightsFee: document.querySelector<HTMLElement>("#insights-fee")!,
+  insightsMempool: document.querySelector<HTMLElement>("#insights-mempool")!,
+  insightsPulseError: document.querySelector<HTMLElement>("#insights-pulse-error")!,
+  insightsCharts: document.querySelector<HTMLElement>("#insights-charts")!,
+  insightsChartsEmpty: document.querySelector<HTMLElement>("#insights-charts-empty")!,
+  btnRefreshInsights: document.querySelector<HTMLButtonElement>("#btn-refresh-insights")!,
+  btnOpenLitview: document.querySelector<HTMLButtonElement>("#btn-open-litview")!,
+  settingsInsightsEnabled: document.querySelector<HTMLInputElement>("#settings-insights-enabled")!,
+  navInsights: document.querySelector<HTMLButtonElement>("#nav-insights")!,
   statMweb: document.querySelector<HTMLElement>("#stat-mweb")!,
   mwebStatusCard: document.querySelector<HTMLElement>("#mweb-status-card")!,
   mwebStatus: document.querySelector<HTMLElement>("#mweb-status")!,
@@ -534,7 +577,11 @@ let mwebProgressTimer: number | null = null;
 let statusTimer: number | null = null;
 let showFiat = true;
 let useExplorerFeeHints = true;
+let insightsEnabled = true;
+let explorerBaseUrl = "https://litview.space";
 let spotPriceUsd: number | null = null;
+let lastNetworkPulse: NetworkPulse | null = null;
+let insightsPulseTimer: number | null = null;
 let lastTotalSats = 0;
 let lastPendingSats = 0;
 let lastCombined: CombinedSummary | null = null;
@@ -607,6 +654,399 @@ async function refreshSpotPrice() {
     renderFiat();
   } catch {
     /* soft-fail: keep last price or hide */
+  }
+}
+
+function formatCompact(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  if (Math.abs(n) >= 1_000_000_000_000) return `${(n / 1_000_000_000_000).toFixed(2)}T`;
+  if (Math.abs(n) >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (Math.abs(n) >= 10_000) return `${(n / 1_000).toFixed(1)}k`;
+  return n.toLocaleString("en-US");
+}
+
+function formatPct(p: number | null | undefined): string {
+  if (p == null || !Number.isFinite(p)) return "";
+  const sign = p > 0 ? "+" : "";
+  return `${sign}${p.toFixed(2)}%`;
+}
+
+function applyChangeClass(node: HTMLElement, pct: number | null | undefined) {
+  node.classList.remove("up", "down");
+  if (pct == null || !Number.isFinite(pct) || pct === 0) return;
+  node.classList.add(pct > 0 ? "up" : "down");
+}
+
+function renderNetworkPulse(pulse: NetworkPulse | null) {
+  const show = insightsEnabled && pulse != null && currentPhase === "ready";
+  el.networkPulse.hidden = !show;
+  el.navInsights.hidden = !insightsEnabled;
+  if (!pulse) return;
+
+  const priceText =
+    formatUsd(pulse.price_usd) +
+    (pulse.price_change_pct != null ? ` ${formatPct(pulse.price_change_pct)}` : "");
+  el.pulsePrice.textContent = priceText;
+  applyChangeClass(el.pulsePrice, pulse.price_change_pct);
+  el.pulseTip.textContent = `#${pulse.tip_height.toLocaleString("en-US")}`;
+  el.pulseFee.textContent = `${pulse.fastest_fee_sat_vb} sat/vB`;
+  el.pulseMempool.textContent = `${formatCompact(pulse.mempool_tx_count)} tx`;
+
+  el.insightsPrice.textContent = priceText;
+  applyChangeClass(el.insightsPrice, pulse.price_change_pct);
+  el.insightsTip.textContent = `#${pulse.tip_height.toLocaleString("en-US")}`;
+  el.insightsFee.textContent = `${pulse.fastest_fee_sat_vb} sat/vB`;
+  el.insightsMempool.textContent = `${formatCompact(pulse.mempool_tx_count)} · ${formatCompact(pulse.mempool_vsize)} vB`;
+
+  for (const node of [el.pulsePrice, el.pulseTip, el.pulseFee, el.pulseMempool]) {
+    node.classList.remove("pulse-pop");
+    void node.offsetWidth;
+    node.classList.add("pulse-pop");
+  }
+}
+
+/** Display order for Insights charts (price stays featured). */
+const INSIGHTS_CHART_ORDER = [
+  "price",
+  "mvrv",
+  "price_drawdown",
+  "fee_median",
+  "tx_count_sum_24h",
+  "hash_rate",
+  "mweb_balance",
+  "mweb_pegin_count_sum_1m",
+] as const;
+
+function formatMetricValue(id: string, value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (id === "price") return formatUsd(value);
+  if (id === "mvrv") return `${value.toFixed(2)}×`;
+  if (id === "price_drawdown") {
+    const sign = value > 0 ? "+" : "";
+    return `${sign}${value.toFixed(1)}%`;
+  }
+  if (id === "fee_median") return `${Math.round(value).toLocaleString("en-US")} sats`;
+  if (id === "tx_count_sum_24h" || id === "mweb_pegin_count_sum_1m") {
+    return formatCompact(value);
+  }
+  if (id === "hash_rate") {
+    if (value >= 1e15) return `${(value / 1e15).toFixed(2)} PH/s`;
+    if (value >= 1e12) return `${(value / 1e12).toFixed(2)} TH/s`;
+    if (value >= 1e9) return `${(value / 1e9).toFixed(2)} GH/s`;
+    return formatCompact(value);
+  }
+  if (id === "mweb_balance") {
+    return `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} LTC`;
+  }
+  return formatCompact(value);
+}
+
+type ChartGeom = {
+  line: string;
+  fill: string;
+  lastX: number;
+  lastY: number;
+  min: number;
+  max: number;
+};
+
+/** Smooth cubic path through points (Catmull-Rom → Bezier). */
+function sparklineGeom(values: number[], width: number, height: number): ChartGeom | null {
+  if (values.length === 0) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const padX = 4;
+  const padY = 8;
+  const innerW = width - padX * 2;
+  const innerH = height - padY * 2;
+  const pts = values.map((v, i) => {
+    const x = padX + (values.length === 1 ? innerW / 2 : (i / (values.length - 1)) * innerW);
+    const y = padY + innerH - ((v - min) / span) * innerH;
+    return { x, y };
+  });
+
+  if (pts.length === 1) {
+    const p = pts[0];
+    return {
+      line: `M${p.x},${p.y}`,
+      fill: `M${padX},${height - padY} L${p.x},${p.y} L${width - padX},${height - padY} Z`,
+      lastX: p.x,
+      lastY: p.y,
+      min,
+      max,
+    };
+  }
+
+  let line = `M${pts[0].x.toFixed(2)},${pts[0].y.toFixed(2)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    const c1x = p1.x + (p2.x - p0.x) / 6;
+    const c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6;
+    const c2y = p2.y - (p3.y - p1.y) / 6;
+    line += ` C${c1x.toFixed(2)},${c1y.toFixed(2)} ${c2x.toFixed(2)},${c2y.toFixed(2)} ${p2.x.toFixed(2)},${p2.y.toFixed(2)}`;
+  }
+  const last = pts[pts.length - 1];
+  const fill = `${line} L${last.x.toFixed(2)},${(height - padY).toFixed(2)} L${pts[0].x.toFixed(2)},${(height - padY).toFixed(2)} Z`;
+  return { line, fill, lastX: last.x, lastY: last.y, min, max };
+}
+
+function chartTone(changePct: number | null | undefined): "up" | "down" | "" {
+  if (changePct == null || !Number.isFinite(changePct) || changePct === 0) return "";
+  return changePct > 0 ? "up" : "down";
+}
+
+function openLitviewPath(path: string) {
+  const cleaned = path.startsWith("/") ? path : `/${path}`;
+  const url = `${explorerBaseUrl.replace(/\/$/, "")}${cleaned}`;
+  void invoke("open_explorer_url", { url });
+}
+
+function renderChartSkeletons() {
+  el.insightsCharts.replaceChildren();
+  el.insightsCharts.setAttribute("aria-busy", "true");
+  el.insightsChartsEmpty.hidden = true;
+  for (const id of INSIGHTS_CHART_ORDER) {
+    const card = document.createElement("div");
+    card.className = `chart-card is-skeleton${id === "price" ? " chart-featured" : ""}`;
+    card.setAttribute("aria-hidden", "true");
+    card.innerHTML = `
+      <div class="chart-card-top">
+        <div class="chart-heading">
+          <span class="chart-skel-line title"></span>
+          <span class="chart-skel-line value"></span>
+        </div>
+        <span class="chart-skel-line badge"></span>
+      </div>
+      <div class="chart-skel-plot"></div>
+      <span class="chart-skel-line chart-skel-foot"></span>
+    `;
+    el.insightsCharts.appendChild(card);
+  }
+}
+
+function buildChartSvg(
+  values: number[],
+  featured: boolean,
+  tone: "up" | "down" | "",
+  gradId: string,
+): SVGSVGElement {
+  const width = featured ? 320 : 200;
+  const height = featured ? 128 : 88;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", `chart-svg${tone ? ` tone-${tone}` : ""}`);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+
+  const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+  const grad = document.createElementNS("http://www.w3.org/2000/svg", "linearGradient");
+  grad.setAttribute("id", gradId);
+  grad.setAttribute("x1", "0");
+  grad.setAttribute("y1", "0");
+  grad.setAttribute("x2", "0");
+  grad.setAttribute("y2", "1");
+  const stopA = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+  stopA.setAttribute("offset", "0%");
+  stopA.setAttribute(
+    "stop-color",
+    tone === "up" ? "var(--success)" : tone === "down" ? "var(--danger)" : "var(--accent)",
+  );
+  stopA.setAttribute("stop-opacity", "0.28");
+  const stopB = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+  stopB.setAttribute("offset", "100%");
+  stopB.setAttribute(
+    "stop-color",
+    tone === "up" ? "var(--success)" : tone === "down" ? "var(--danger)" : "var(--accent)",
+  );
+  stopB.setAttribute("stop-opacity", "0");
+  grad.append(stopA, stopB);
+  defs.appendChild(grad);
+  svg.appendChild(defs);
+
+  const grid = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  grid.setAttribute("class", "chart-grid");
+  for (const y of [0.25, 0.5, 0.75].map((t) => 8 + (height - 16) * t)) {
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", "0");
+    line.setAttribute("x2", String(width));
+    line.setAttribute("y1", y.toFixed(1));
+    line.setAttribute("y2", y.toFixed(1));
+    grid.appendChild(line);
+  }
+  svg.appendChild(grid);
+
+  const geom = sparklineGeom(values, width, height);
+  if (!geom) return svg;
+
+  const fillPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  fillPath.setAttribute("class", "chart-fill");
+  fillPath.setAttribute("d", geom.fill);
+  fillPath.setAttribute("fill", `url(#${gradId})`);
+  svg.appendChild(fillPath);
+
+  const linePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  linePath.setAttribute("class", "chart-line");
+  linePath.setAttribute("d", geom.line);
+  svg.appendChild(linePath);
+
+  const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  dot.setAttribute("class", "chart-dot");
+  dot.setAttribute("cx", geom.lastX.toFixed(2));
+  dot.setAttribute("cy", geom.lastY.toFixed(2));
+  dot.setAttribute("r", featured ? "4" : "3.2");
+  svg.appendChild(dot);
+
+  return svg;
+}
+
+function renderInsightCharts(series: MetricSeries[]) {
+  el.insightsCharts.replaceChildren();
+  el.insightsCharts.setAttribute("aria-busy", "false");
+  el.insightsChartsEmpty.hidden = series.length > 0;
+  if (series.length === 0) {
+    el.insightsChartsEmpty.textContent = "No charts available right now.";
+    return;
+  }
+
+  const rank = new Map<string, number>(
+    INSIGHTS_CHART_ORDER.map((id, i) => [id, i]),
+  );
+  const ordered = [...series].sort((a, b) => {
+    const ai = rank.get(a.id) ?? 999;
+    const bi = rank.get(b.id) ?? 999;
+    return ai - bi;
+  });
+
+  for (const s of ordered) {
+    const featured = s.id === "price";
+    const tone = chartTone(s.change_pct);
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `chart-card${featured ? " chart-featured" : ""}`;
+    card.setAttribute(
+      "aria-label",
+      `${s.title}: ${formatMetricValue(s.id, s.latest)}${s.change_pct != null ? `, ${formatPct(s.change_pct)} over 30 days` : ""}`,
+    );
+
+    const top = document.createElement("div");
+    top.className = "chart-card-top";
+    const heading = document.createElement("div");
+    heading.className = "chart-heading";
+    const title = document.createElement("span");
+    title.className = "chart-title";
+    title.textContent = s.title;
+    const value = document.createElement("span");
+    value.className = "chart-value";
+    value.textContent = formatMetricValue(s.id, s.latest);
+    heading.append(title, value);
+
+    const change = document.createElement("span");
+    change.className = `chart-change${tone ? ` ${tone}` : ""}`;
+    change.textContent = s.change_pct != null ? formatPct(s.change_pct) : "30d";
+    top.append(heading, change);
+
+    const plot = document.createElement("div");
+    plot.className = "chart-plot";
+    const gradId = `chart-fill-${s.id.replace(/[^a-z0-9_-]/gi, "")}`;
+    plot.appendChild(buildChartSvg(s.values, featured, tone, gradId));
+
+    const min = s.values.length ? Math.min(...s.values) : null;
+    const max = s.values.length ? Math.max(...s.values) : null;
+    const range = document.createElement("div");
+    range.className = "chart-range";
+    const low = document.createElement("span");
+    low.textContent = `Low ${formatMetricValue(s.id, min)}`;
+    const high = document.createElement("span");
+    high.textContent = `High ${formatMetricValue(s.id, max)}`;
+    range.append(low, high);
+
+    const foot = document.createElement("div");
+    foot.className = "chart-card-foot";
+    const windowLabel = document.createElement("span");
+    windowLabel.textContent = "30-day window";
+    const openLabel = document.createElement("span");
+    openLabel.className = "chart-open-label";
+    openLabel.textContent = "Open in litview";
+    foot.append(windowLabel, openLabel);
+
+    card.append(top, plot, range, foot);
+    card.addEventListener("click", () => openLitviewPath(s.litview_path || "/charts"));
+    el.insightsCharts.appendChild(card);
+  }
+}
+
+function setInsightsPulseLoading(loading: boolean) {
+  el.insightsPulseGrid.classList.toggle("is-loading", loading);
+  if (loading && lastNetworkPulse == null) {
+    for (const node of [el.insightsPrice, el.insightsTip, el.insightsFee, el.insightsMempool]) {
+      node.textContent = "••••";
+    }
+  }
+}
+
+async function refreshNetworkPulse() {
+  if (!insightsEnabled || currentPhase !== "ready") {
+    el.networkPulse.hidden = true;
+    return;
+  }
+  try {
+    lastNetworkPulse = await invoke<NetworkPulse>("fetch_network_pulse");
+    el.insightsPulseError.hidden = true;
+    setInsightsPulseLoading(false);
+    renderNetworkPulse(lastNetworkPulse);
+    if (showFiat && lastNetworkPulse) {
+      spotPriceUsd = lastNetworkPulse.price_usd;
+      renderFiat();
+    }
+  } catch (e) {
+    setInsightsPulseLoading(false);
+    el.networkPulse.hidden = lastNetworkPulse == null;
+    el.insightsPulseError.hidden = false;
+    el.insightsPulseError.textContent = String(e);
+  }
+}
+
+async function refreshInsightsView() {
+  if (!insightsEnabled || currentPhase !== "ready") return;
+  const showChartSkeleton = el.insightsCharts.childElementCount === 0;
+  setInsightsPulseLoading(lastNetworkPulse == null);
+  if (showChartSkeleton) renderChartSkeletons();
+  el.btnRefreshInsights.disabled = true;
+
+  const pulseTask = refreshNetworkPulse();
+  const chartsTask = invoke<MetricSeries[]>("fetch_insight_charts")
+    .then((charts) => {
+      renderInsightCharts(charts);
+    })
+    .catch((e) => {
+      renderInsightCharts([]);
+      el.insightsChartsEmpty.hidden = false;
+      el.insightsChartsEmpty.textContent = String(e);
+    });
+
+  await Promise.all([pulseTask, chartsTask]);
+  el.btnRefreshInsights.disabled = false;
+}
+
+function startInsightsPulse() {
+  stopInsightsPulse();
+  if (!insightsEnabled || currentPhase !== "ready") return;
+  void refreshNetworkPulse();
+  insightsPulseTimer = window.setInterval(() => {
+    void refreshNetworkPulse();
+  }, INSIGHTS_PULSE_MS);
+}
+
+function stopInsightsPulse() {
+  if (insightsPulseTimer != null) {
+    clearInterval(insightsPulseTimer);
+    insightsPulseTimer = null;
   }
 }
 
@@ -926,8 +1366,13 @@ function setPhase(next: Phase) {
   el.onboarding.hidden = next !== "onboarding";
   el.mnemonic.hidden = next !== "mnemonic";
   el.ready.hidden = next !== "ready";
-  if (next === "ready") startAutoSync();
-  else stopAutoSync();
+  if (next === "ready") {
+    startAutoSync();
+    startInsightsPulse();
+  } else {
+    stopAutoSync();
+    stopInsightsPulse();
+  }
   if (next !== "mnemonic") showMnemonicStep("show");
   updateBackupBanner();
   updateMaturityBanner(0);
@@ -971,6 +1416,7 @@ function setView(next: View) {
   applyCardState();
   if (next === "coins") void refreshUtxos();
   if (next === "settings") void loadElectrumPresets();
+  if (next === "insights") void refreshInsightsView();
 }
 
 function setCard(next: Card | null) {
@@ -995,6 +1441,14 @@ for (const card of CARDS) {
 }
 
 el.btnSeeAll.addEventListener("click", () => setView("history"));
+
+el.networkPulse.addEventListener("click", () => setView("insights"));
+
+el.btnRefreshInsights.addEventListener("click", () => void refreshInsightsView());
+
+el.btnOpenLitview.addEventListener("click", () => {
+  openLitviewPath("/charts");
+});
 
 el.historySearch.addEventListener("input", () => {
   historySearchQuery = el.historySearch.value;
@@ -3044,10 +3498,13 @@ async function loadSettings() {
   try {
     const s = await invoke<WalletSettings>("get_settings");
     el.settingsExplorer.value = s.explorer_base_url || "https://litview.space";
+    explorerBaseUrl = s.explorer_base_url || "https://litview.space";
     el.settingsShowFiat.checked = s.show_fiat ?? true;
     el.settingsFeeHints.checked = s.use_explorer_fee_hints ?? true;
     showFiat = s.show_fiat ?? true;
     useExplorerFeeHints = s.use_explorer_fee_hints ?? true;
+    insightsEnabled = s.insights_enabled ?? true;
+    el.settingsInsightsEnabled.checked = insightsEnabled;
     el.settingsElectrum.value = s.electrum_url;
     el.settingsValidateTls.checked = s.electrum_validate_domain ?? true;
     el.settingsPublicFallback.checked = s.electrum_use_public_fallback ?? true;
@@ -3076,6 +3533,12 @@ async function loadSettings() {
       mwebStale: lastCombined?.mweb_stale,
     });
     updateSecurityChecklist();
+    el.navInsights.hidden = !insightsEnabled;
+    if (insightsEnabled) startInsightsPulse();
+    else {
+      stopInsightsPulse();
+      el.networkPulse.hidden = true;
+    }
     await refreshContacts();
     await loadElectrumPresets();
   } catch {
@@ -4578,11 +5041,21 @@ el.btnSaveSettings.addEventListener("click", async () => {
         explorer_base_url: el.settingsExplorer.value.trim() || "https://litview.space",
         show_fiat: el.settingsShowFiat.checked,
         use_explorer_fee_hints: el.settingsFeeHints.checked,
+        insights_enabled: el.settingsInsightsEnabled.checked,
       },
     });
     autoLockMinutes = autoLock;
     showFiat = el.settingsShowFiat.checked;
     useExplorerFeeHints = el.settingsFeeHints.checked;
+    insightsEnabled = el.settingsInsightsEnabled.checked;
+    explorerBaseUrl = el.settingsExplorer.value.trim() || "https://litview.space";
+    el.navInsights.hidden = !insightsEnabled;
+    if (insightsEnabled) startInsightsPulse();
+    else {
+      stopInsightsPulse();
+      el.networkPulse.hidden = true;
+      if (currentView === "insights") setView("balance");
+    }
     if (!showFiat) {
       spotPriceUsd = null;
       renderFiat();

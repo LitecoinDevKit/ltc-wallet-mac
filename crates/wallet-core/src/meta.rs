@@ -86,6 +86,9 @@ pub struct WalletMeta {
     /// Show explorer fee-rate chips on send.
     #[serde(default = "default_true")]
     pub use_explorer_fee_hints: bool,
+    /// Insights / litview pulse and charts.
+    #[serde(default = "default_true")]
+    pub insights_enabled: bool,
 }
 
 impl WalletMeta {
@@ -105,6 +108,7 @@ impl WalletMeta {
             explorer_base_url: default_explorer_base_url(),
             show_fiat: true,
             use_explorer_fee_hints: true,
+            insights_enabled: true,
         }
     }
 }
@@ -213,6 +217,8 @@ pub fn remove_wallet_files(data_dir: &Path) -> Result<(), WalletError> {
         data_dir.join(TX_LABELS_FILE),
         data_dir.join(UTXO_LABELS_FILE),
         data_dir.join(CONTACTS_FILE),
+        // Legacy Insights LLM key file (feature removed; delete on wipe if present).
+        data_dir.join("insights_llm_key.enc"),
         data_dir.join(MNEMONIC_FILE),
         data_dir.join(MNEMONIC_ENC_FILE),
     ] {

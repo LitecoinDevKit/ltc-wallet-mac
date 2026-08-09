@@ -39,6 +39,7 @@ MWEB peers default to `127.0.0.1:9333` (user-configurable). Electrum TLS certifi
 - `transactions` / `send` (optional `drain`)
 - `settings` / `update_settings` (includes `explorer_base_url`, `show_fiat`, `use_explorer_fee_hints`)
 - `explorer_tx_url` / `open_explorer_url` / `fetch_tx_detail` / `fetch_spot_price` / `fetch_fee_ladder`
+- Insights (litview): `fetch_network_pulse` / `fetch_insight_charts`
 - `get_tx_labels` / `set_tx_label` / `export_history`
 - `list_contacts` / `upsert_contact` / `delete_contact`
 - `list_unspent` / `set_utxo_locked` / `set_utxo_label` (Public coin control; `SendRequest.selected_outpoints`)
@@ -52,7 +53,7 @@ Peg-in is a **self-transfer** from the wallet’s own transparent UTXOs. Exchang
 
 ## Screens
 
-Boot → Unlock | Migrate | Onboarding → Mnemonic backup → verify quiz → Home (balance, QR, send, history, MWEB, settings).
+Boot → Unlock | Migrate | Onboarding → Mnemonic backup → verify quiz → Home (balance, QR, send, history, Insights, MWEB, settings).
 
 ## UX backlog ([`docs/UX_REVIEW.md`](UX_REVIEW.md))
 
@@ -78,11 +79,11 @@ Boot → Unlock | Migrate | Onboarding → Mnemonic backup → verify quiz → H
 10. UX P3 privacy hardening (hide balance, reuse warn, disclosure, labels)
 11. UX P4 shippable (history search/export, contacts, Public coin control)
 
-## Litview / LRK
+## Litview / LRK / Insights
 
 First-party explorer at [litview.space](https://litview.space). Design and privacy
-matrix: [`docs/LITVIEW.md`](LITVIEW.md). Deep links + optional enrichment/price/fees
-via Rust `ureq`; never scan wallet addresses against litview.
+matrix: [`docs/LITVIEW.md`](LITVIEW.md). Deep links + enrichment/price/fees + Insights
+(pulse, charts) via Rust `ureq`; never scan wallet addresses against litview.
 
 ## Out of scope (still)
 

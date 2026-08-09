@@ -6,12 +6,12 @@ use tauri::{AppHandle, Manager, State};
 use wallet_core::{
     AddressReuseHint, CombinedSummary, ContactRecord, CreateWalletRequest, CreateWalletResponse,
     DeleteContactRequest, ElectrumProbe, FeeEstimate, FeeLadder, HistoryExportFormat,
-    MetadataImportResult, MigrateEncryptRequest, MwebBroadcastResult, MwebSendPreview,
-    MwebSendRequest, MwebSyncProgress, PeginPreview, PeginRequest, PeginResult, PegoutPreview,
-    PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
-    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment, TxRecord, UnlockRequest,
-    UpdateSettingsRequest, UpsertContactRequest, UtxoRecord, WalletApp, WalletSettings,
-    WalletSummary,
+    MetadataImportResult, MetricSeries, MigrateEncryptRequest, MwebBroadcastResult,
+    MwebSendPreview, MwebSendRequest, MwebSyncProgress, NetworkPulse, PeginPreview, PeginRequest,
+    PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest,
+    SendResult, SetTxLabelRequest, SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult,
+    TxEnrichment, TxRecord, UnlockRequest, UpdateSettingsRequest, UpsertContactRequest, UtxoRecord,
+    WalletApp, WalletSettings, WalletSummary,
 };
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -607,6 +607,24 @@ async fn fetch_fee_ladder(state: State<'_, Arc<WalletApp>>) -> Result<FeeLadder,
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn fetch_network_pulse(state: State<'_, Arc<WalletApp>>) -> Result<NetworkPulse, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.fetch_network_pulse().map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn fetch_insight_charts(
+    state: State<'_, Arc<WalletApp>>,
+) -> Result<Vec<MetricSeries>, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.fetch_insight_charts().map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Phrase the user must type before a wipe is executed. Checked here at the
 /// IPC boundary (not only in the UI) so a scripted or compromised webview
 /// cannot destroy the wallet with a bare `invoke("wipe_wallet")`.
@@ -689,6 +707,8 @@ pub fn run() {
             fetch_tx_detail,
             fetch_spot_price,
             fetch_fee_ladder,
+            fetch_network_pulse,
+            fetch_insight_charts,
             wipe_wallet,
         ])
         .run(tauri::generate_context!())

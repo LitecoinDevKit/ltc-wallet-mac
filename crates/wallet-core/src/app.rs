@@ -55,6 +55,7 @@ struct WalletState {
     explorer_base_url: String,
     show_fiat: bool,
     use_explorer_fee_hints: bool,
+    insights_enabled: bool,
     data_dir: PathBuf,
     needs_full_scan: bool,
     needs_mweb_scan: bool,
@@ -79,6 +80,7 @@ fn meta_from_state(state: &WalletState) -> WalletMeta {
         explorer_base_url: state.explorer_base_url.clone(),
         show_fiat: state.show_fiat,
         use_explorer_fee_hints: state.use_explorer_fee_hints,
+        insights_enabled: state.insights_enabled,
     }
 }
 
@@ -318,6 +320,7 @@ impl WalletApp {
             explorer_base_url: meta.explorer_base_url,
             show_fiat: meta.show_fiat,
             use_explorer_fee_hints: meta.use_explorer_fee_hints,
+            insights_enabled: meta.insights_enabled,
             data_dir: data_dir.to_path_buf(),
             needs_full_scan: meta.needs_full_scan,
             needs_mweb_scan: meta.needs_mweb_scan,
@@ -451,6 +454,7 @@ impl WalletApp {
             explorer_base_url: state.explorer_base_url.clone(),
             show_fiat: state.show_fiat,
             use_explorer_fee_hints: state.use_explorer_fee_hints,
+            insights_enabled: state.insights_enabled,
         })
     }
 
@@ -622,6 +626,7 @@ impl WalletApp {
         state.explorer_base_url = explorer_base_url;
         state.show_fiat = req.show_fiat;
         state.use_explorer_fee_hints = req.use_explorer_fee_hints;
+        state.insights_enabled = req.insights_enabled;
         meta::write_meta(&state.data_dir, &meta_from_state(state))?;
         Ok(())
     }
@@ -681,6 +686,30 @@ impl WalletApp {
             state.explorer_base_url.clone()
         };
         crate::explorer::fetch_fee_ladder(&base)
+    }
+
+    fn require_insights_enabled(&self) -> Result<String, WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        if !state.insights_enabled {
+            return Err(WalletError::Insights(
+                "Insights are disabled in Settings".into(),
+            ));
+        }
+        Ok(state.explorer_base_url.clone())
+    }
+
+    /// Litview network pulse for Balance strip / Insights header.
+    pub fn fetch_network_pulse(&self) -> Result<crate::dto::NetworkPulse, WalletError> {
+        let base = self.require_insights_enabled()?;
+        crate::insights::fetch_network_pulse(&base)
+    }
+
+    /// Allowlisted litview metric series for Insights charts.
+    pub fn fetch_insight_charts(&self) -> Result<Vec<crate::dto::MetricSeries>, WalletError> {
+        let base = self.require_insights_enabled()?;
+        crate::insights::fetch_insight_charts(&base)
     }
 
     pub fn sync(&self) -> Result<SyncResult, WalletError> {
@@ -1156,6 +1185,7 @@ impl WalletApp {
             explorer_base_url: meta.explorer_base_url,
             show_fiat: meta.show_fiat,
             use_explorer_fee_hints: meta.use_explorer_fee_hints,
+            insights_enabled: meta.insights_enabled,
             data_dir: data_dir.to_path_buf(),
             needs_full_scan: meta.needs_full_scan,
             needs_mweb_scan: meta.needs_mweb_scan,
@@ -1268,6 +1298,7 @@ impl MemoryBackedApp {
             explorer_base_url: meta.explorer_base_url,
             show_fiat: meta.show_fiat,
             use_explorer_fee_hints: meta.use_explorer_fee_hints,
+            insights_enabled: meta.insights_enabled,
             data_dir: data_dir.to_path_buf(),
             needs_full_scan: meta.needs_full_scan,
             needs_mweb_scan: meta.needs_mweb_scan,
@@ -1525,6 +1556,7 @@ impl MemoryBackedApp {
             explorer_base_url: meta.explorer_base_url,
             show_fiat: meta.show_fiat,
             use_explorer_fee_hints: meta.use_explorer_fee_hints,
+            insights_enabled: meta.insights_enabled,
             data_dir: data_dir.to_path_buf(),
             needs_full_scan: meta.needs_full_scan,
             needs_mweb_scan: meta.needs_mweb_scan,

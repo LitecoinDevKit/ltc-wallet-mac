@@ -60,6 +60,9 @@ pub enum WalletError {
     #[error("explorer error: {0}")]
     Explorer(String),
 
+    #[error("insights error: {0}")]
+    Insights(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

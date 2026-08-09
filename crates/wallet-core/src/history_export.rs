@@ -62,7 +62,7 @@ fn csv_escape(value: &str) -> String {
 /// Build a CSV document of non-secret history fields.
 pub fn to_csv(txs: &[TxRecord], labels: &HashMap<String, String>) -> String {
     let mut out = String::from(
-        "txid,kind,net_sats,sent_sats,received_sats,fee_sats,height,confirmations,timestamp,note\n",
+        "txid,kind,net_lits,sent_lits,received_lits,fee_lits,height,confirmations,timestamp,note\n",
     );
     for tx in txs {
         let note = labels.get(&tx.txid).map(String::as_str).unwrap_or("");
@@ -93,10 +93,10 @@ pub fn to_csv(txs: &[TxRecord], labels: &HashMap<String, String>) -> String {
 struct ExportRow<'a> {
     txid: &'a str,
     kind: &'static str,
-    net_sats: i64,
-    sent_sats: u64,
-    received_sats: u64,
-    fee_sats: Option<u64>,
+    net_lits: i64,
+    sent_lits: u64,
+    received_lits: u64,
+    fee_lits: Option<u64>,
     height: Option<u32>,
     confirmations: u32,
     timestamp: Option<u64>,
@@ -110,10 +110,10 @@ pub fn to_json(txs: &[TxRecord], labels: &HashMap<String, String>) -> Result<Str
         .map(|tx| ExportRow {
             txid: &tx.txid,
             kind: kind_slug(tx.kind),
-            net_sats: tx.net_sats,
-            sent_sats: tx.sent_sats,
-            received_sats: tx.received_sats,
-            fee_sats: tx.fee_sats,
+            net_lits: tx.net_sats,
+            sent_lits: tx.sent_sats,
+            received_lits: tx.received_sats,
+            fee_lits: tx.fee_sats,
             height: tx.height,
             confirmations: tx.confirmations,
             timestamp: tx.timestamp,
@@ -163,7 +163,7 @@ mod tests {
         labels.insert("id,with,comma".into(), "hello \"world\"".into());
         let csv = to_csv(&[tx], &labels);
         assert!(csv.starts_with(
-            "txid,kind,net_sats,sent_sats,received_sats,fee_sats,height,confirmations,timestamp,note\n"
+            "txid,kind,net_lits,sent_lits,received_lits,fee_lits,height,confirmations,timestamp,note\n"
         ));
         assert!(csv.contains("\"id,with,comma\""));
         assert!(csv.contains("transparent"));
@@ -179,5 +179,7 @@ mod tests {
         assert!(json.contains("\"txid\": \"abcd1234\""));
         assert!(json.contains("\"note\": \"coffee\""));
         assert!(json.contains("\"kind\": \"transparent\""));
+        assert!(json.contains("\"net_lits\""));
+        assert!(json.contains("\"fee_lits\""));
     }
 }

@@ -12,6 +12,7 @@ mod error;
 pub mod explorer;
 mod contacts;
 mod history_export;
+mod insights;
 mod labels;
 mod meta;
 mod metadata;
@@ -28,12 +29,12 @@ pub use seed::{derive_preview, DerivePreview, MasterSecret, MwebSchemePreview};
 pub use dto::{
     AddressReuseHint, CombinedSummary, ContactKind, ContactRecord, CreateWalletRequest,
     CreateWalletResponse, DeleteContactRequest, ElectrumProbe, FeeEstimate, FeeLadder,
-    MigrateEncryptRequest, MwebBroadcastResult, MwebScheme, MwebSendPreview, MwebSendRequest,
-    MwebSyncProgress, PeginPreview, PeginRequest, PeginResult, PegoutPreview, PegoutRequest,
-    RestoreWalletRequest, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
-    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment, TxIo, TxKind, TxRecord,
-    TxStatus, UnlockRequest, UpdateSettingsRequest, UpsertContactRequest, UtxoRecord,
-    WalletSettings, WalletSummary, DEFAULT_MWEB_FEE_SATS,
+    MetricSeries, MigrateEncryptRequest, MwebBroadcastResult, MwebScheme, MwebSendPreview,
+    MwebSendRequest, MwebSyncProgress, NetworkPulse, PeginPreview, PeginRequest, PeginResult,
+    PegoutPreview, PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest, SendResult,
+    SetTxLabelRequest, SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment, TxIo,
+    TxKind, TxRecord, TxStatus, UnlockRequest, UpdateSettingsRequest, UpsertContactRequest,
+    UtxoRecord, WalletSettings, WalletSummary, DEFAULT_MWEB_FEE_SATS,
 };
 pub use explorer::{DEFAULT_EXPLORER_BASE_URL, is_chain_txid};
 pub use error::{BroadcastFailureKind, WalletError};
