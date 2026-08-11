@@ -8,10 +8,11 @@ use wallet_core::{
     DeleteContactRequest, ElectrumProbe, FeeEstimate, FeeLadder, HistoryExportFormat,
     MetadataImportResult, MetricSeries, MigrateEncryptRequest, MwebBroadcastResult,
     MwebSendPreview, MwebSendRequest, MwebSyncProgress, NetworkPulse, PeginPreview, PeginRequest,
-    PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest,
-    SendResult, SetTxLabelRequest, SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult,
-    TxEnrichment, TxRecord, UnlockRequest, UpdateSettingsRequest, UpsertContactRequest, UtxoRecord,
-    WalletApp, WalletSettings, WalletSummary,
+    PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest, RevealMnemonicRequest,
+    RevealMnemonicResponse, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
+    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment, TxRecord, UnlockRequest,
+    UpdateSettingsRequest, UpsertContactRequest, UtxoRecord, WalletApp, WalletSettings,
+    WalletSummary,
 };
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -64,6 +65,17 @@ async fn lock_wallet(state: State<'_, Arc<WalletApp>>) -> Result<(), String> {
     let wallet = Arc::clone(&state);
     wallet.lock();
     Ok(())
+}
+
+#[tauri::command]
+async fn reveal_mnemonic(
+    state: State<'_, Arc<WalletApp>>,
+    req: RevealMnemonicRequest,
+) -> Result<RevealMnemonicResponse, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.reveal_mnemonic(req).map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -663,6 +675,7 @@ pub fn run() {
             wallet_needs_migration,
             unlock_wallet,
             lock_wallet,
+            reveal_mnemonic,
             migrate_encrypt,
             create_wallet,
             restore_wallet,

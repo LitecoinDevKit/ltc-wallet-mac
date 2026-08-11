@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 use wallet_core::{
-    derive_preview, MemoryBackedApp, MemoryStore, MwebScheme, RestoreWalletRequest, SecretStore,
-    WalletApp, WalletNetwork,
+    derive_preview, CreateWalletRequest, MemoryBackedApp, MemoryStore, MwebScheme,
+    RestoreWalletRequest, RevealMnemonicRequest, SecretStore, WalletApp, WalletError,
+    WalletNetwork,
 };
 
 fn with_secrets(secrets: Arc<dyn SecretStore>) -> MemoryBackedApp {
@@ -153,6 +154,62 @@ fn account_level_zprv_is_rejected_with_clear_error() {
     assert!(msg.contains("depth 1"), "{msg}");
     assert!(msg.contains("root"), "{msg}");
     assert!(!app.exists(dir.path()), "no wallet files should be left");
+}
+
+#[test]
+fn reveal_mnemonic_requires_passphrase_and_returns_phrase() {
+    let dir = tempdir().unwrap();
+    let app = WalletApp::new(dir.path());
+    let created = app
+        .create(
+            dir.path(),
+            CreateWalletRequest {
+                network: WalletNetwork::Testnet,
+                electrum_url: None,
+            },
+            "correct horse battery staple",
+        )
+        .expect("create");
+
+    let wrong = app.reveal_mnemonic(RevealMnemonicRequest {
+        passphrase: "wrong passphrase!!".into(),
+    });
+    assert!(matches!(wrong, Err(WalletError::IncorrectPassphrase)));
+
+    app.lock();
+    let revealed = app
+        .reveal_mnemonic(RevealMnemonicRequest {
+            passphrase: "correct horse battery staple".into(),
+        })
+        .expect("reveal");
+    assert_eq!(revealed.kind, "BIP39 mnemonic");
+    assert_eq!(revealed.phrase, created.mnemonic);
+    assert!(revealed.aezeed_passphrase.is_none());
+    assert!(!app.is_locked(), "successful reveal leaves the wallet unlocked");
+}
+
+#[test]
+fn reveal_mnemonic_strips_aezeed_storage_tag() {
+    let dir = tempdir().unwrap();
+    let app = WalletApp::new(dir.path());
+    app.restore(
+        dir.path(),
+        restore_req(AEZEED_WORDS, MwebScheme::Mwebd),
+        "correct horse battery staple",
+    )
+    .expect("restore aezeed");
+
+    let revealed = app
+        .reveal_mnemonic(RevealMnemonicRequest {
+            passphrase: "correct horse battery staple".into(),
+        })
+        .expect("reveal");
+    assert_eq!(revealed.kind, "aezeed seed");
+    assert_eq!(
+        revealed.phrase.split_whitespace().collect::<Vec<_>>(),
+        AEZEED_WORDS.split_whitespace().collect::<Vec<_>>(),
+    );
+    assert!(!revealed.phrase.starts_with("aezeed:"));
 }
 
 /// End-to-end through the production `WalletApp` (encrypted secret store and

@@ -159,6 +159,17 @@ impl MasterSecret {
             Self::Xprv(_) => "extended private key",
         }
     }
+
+    /// Backup material without storage tags: phrase/key plus optional aezeed cipher passphrase.
+    pub fn backup_material(&self) -> (String, Option<String>) {
+        match self {
+            Self::Bip39(m) => (m.to_string(), None),
+            Self::Aezeed {
+                words, passphrase, ..
+            } => (words.clone(), passphrase.clone()),
+            Self::Xprv(xprv) => (xprv.to_string(), None),
+        }
+    }
 }
 
 /// Address-derivation preview for cross-wallet parity checks (e.g. against

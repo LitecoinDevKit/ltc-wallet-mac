@@ -17,10 +17,11 @@ use crate::dto::{
     AddressReuseHint, CombinedSummary, CreateWalletRequest, CreateWalletResponse, ElectrumProbe,
     FeeEstimate, ContactRecord, DeleteContactRequest, MigrateEncryptRequest, MwebBroadcastResult,
     MwebScheme, MwebSendPreview, MwebSendRequest, PeginPreview, PeginRequest, PeginResult,
-    PegoutPreview, PegoutRequest, RestoreWalletRequest, SendPreview, SendRequest, SendResult,
-    SetTxLabelRequest, SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxKind, TxRecord,
-    UpsertContactRequest, UtxoRecord, UnlockRequest, UpdateSettingsRequest, WalletSettings,
-    WalletSummary, DEFAULT_MWEB_FEE_SATS,
+    PegoutPreview, PegoutRequest, RestoreWalletRequest, RevealMnemonicRequest,
+    RevealMnemonicResponse, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
+    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxKind, TxRecord, UpsertContactRequest,
+    UtxoRecord, UnlockRequest, UpdateSettingsRequest, WalletSettings, WalletSummary,
+    DEFAULT_MWEB_FEE_SATS,
 };
 use crate::contacts;
 use crate::labels;
@@ -187,6 +188,32 @@ impl WalletApp {
 
     pub fn unlock(&self, req: UnlockRequest) -> Result<(), WalletError> {
         self.secrets.unlock(&req.passphrase)
+    }
+
+    /// Re-verify the wallet passphrase and return the stored recovery secret for display.
+    ///
+    /// Always re-decrypts (does not trust an already-unlocked session). Plaintext
+    /// legacy stores (awaiting migration) have no passphrase to check.
+    pub fn reveal_mnemonic(
+        &self,
+        req: RevealMnemonicRequest,
+    ) -> Result<RevealMnemonicResponse, WalletError> {
+        if self.secrets.needs_migration() {
+            // Plaintext store — nothing to verify against.
+        } else {
+            self.secrets.unlock(&req.passphrase)?;
+        }
+        let stored = self
+            .secrets
+            .get_mnemonic()?
+            .ok_or(WalletError::MissingMnemonic)?;
+        let secret = MasterSecret::from_stored(&stored)?;
+        let (phrase, aezeed_passphrase) = secret.backup_material();
+        Ok(RevealMnemonicResponse {
+            kind: secret.kind().to_string(),
+            phrase,
+            aezeed_passphrase,
+        })
     }
 
     /// Lock immediately: wipe the decrypted mnemonic, then drop in-memory wallet

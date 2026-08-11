@@ -31,6 +31,12 @@ type CreateWalletResponse = {
   summary: WalletSummary;
 };
 
+type RevealMnemonicResponse = {
+  kind: string;
+  phrase: string;
+  aezeed_passphrase?: string | null;
+};
+
 type SyncResult = {
   summary: WalletSummary;
   new_txs: number;
@@ -515,6 +521,7 @@ const el = {
   btnUnlock: document.querySelector<HTMLButtonElement>("#btn-unlock")!,
   btnMigrate: document.querySelector<HTMLButtonElement>("#btn-migrate")!,
   btnSaveSettings: document.querySelector<HTMLButtonElement>("#btn-save-settings")!,
+  btnRevealMnemonic: document.querySelector<HTMLButtonElement>("#btn-reveal-mnemonic")!,
   btnLock: document.querySelector<HTMLButtonElement>("#btn-lock")!,
   btnPegin: document.querySelector<HTMLButtonElement>("#btn-pegin")!,
   btnMwebSend: document.querySelector<HTMLButtonElement>("#btn-mweb-send")!,
@@ -2084,6 +2091,52 @@ async function showResult(opts: {
 }
 
 /**
+ * Prompt for the wallet passphrase. Returns the typed value, or `null` if cancelled.
+ * Does not verify against the secret store — callers that need a check should invoke
+ * a guarded command (e.g. `unlock_wallet` / `reveal_mnemonic`) with the result.
+ */
+async function promptPassphrase(
+  reason: string,
+  opts?: { errorText?: string | null },
+): Promise<string | null> {
+  let value = "";
+  let input: HTMLInputElement | null = null;
+  const result = await openModal({
+    title: "Confirm your passphrase",
+    build: (body) => {
+      appendParagraph(body, reason, "lede");
+      const label = document.createElement("label");
+      label.className = "field";
+      const caption = document.createElement("span");
+      caption.className = "field-label";
+      caption.textContent = "Passphrase";
+      input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "current-password";
+      input.addEventListener("input", () => {
+        value = input!.value;
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          closeModal("submit");
+        }
+      });
+      label.append(caption, input);
+      body.appendChild(label);
+      if (opts?.errorText) appendParagraph(body, opts.errorText, "modal-error");
+    },
+    actions: [
+      { id: "cancel", label: "Cancel", kind: "ghost" },
+      { id: "submit", label: "Continue", kind: "primary" },
+    ],
+    focus: () => input,
+  });
+  if (result !== "submit") return null;
+  return value;
+}
+
+/**
  * Re-authenticate before a destructive action. `unlock_wallet` re-decrypts the
  * stored blob, so a wrong passphrase fails before any lock is taken and the
  * unlocked session is left untouched.
@@ -2098,41 +2151,8 @@ async function requirePassphrase(reason: string): Promise<boolean> {
 
   let errorText: string | null = null;
   for (;;) {
-    let value = "";
-    let input: HTMLInputElement | null = null;
-    const result = await openModal({
-      title: "Confirm your passphrase",
-      build: (body) => {
-        appendParagraph(body, reason, "lede");
-        const label = document.createElement("label");
-        label.className = "field";
-        const caption = document.createElement("span");
-        caption.className = "field-label";
-        caption.textContent = "Passphrase";
-        input = document.createElement("input");
-        input.type = "password";
-        input.autocomplete = "current-password";
-        input.addEventListener("input", () => {
-          value = input!.value;
-        });
-        input.addEventListener("keydown", (event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            closeModal("submit");
-          }
-        });
-        label.append(caption, input);
-        body.appendChild(label);
-        if (errorText) appendParagraph(body, errorText, "modal-error");
-      },
-      actions: [
-        { id: "cancel", label: "Cancel", kind: "ghost" },
-        { id: "submit", label: "Continue", kind: "primary" },
-      ],
-      focus: () => input,
-    });
-
-    if (result !== "submit") return false;
+    const value = await promptPassphrase(reason, { errorText });
+    if (value == null) return false;
     if (!value) {
       errorText = "Enter your passphrase.";
       continue;
@@ -2147,6 +2167,116 @@ async function requirePassphrase(reason: string): Promise<boolean> {
       hideLoading();
     }
   }
+}
+
+function appendMnemonicGrid(host: HTMLElement, phrase: string) {
+  const grid = document.createElement("div");
+  grid.className = "mnemonic-grid";
+  for (const [i, word] of splitMnemonicWords(phrase).entries()) {
+    const chip = document.createElement("div");
+    chip.className = "mnemonic-word";
+    const index = document.createElement("span");
+    index.className = "mnemonic-index";
+    index.textContent = String(i + 1);
+    const text = document.createElement("span");
+    text.textContent = word;
+    chip.append(index, text);
+    grid.appendChild(chip);
+  }
+  host.appendChild(grid);
+}
+
+async function viewRecoveryPhrase() {
+  let needsMigration = false;
+  try {
+    needsMigration = await invoke<boolean>("wallet_needs_migration");
+  } catch {
+    /* ask for passphrase */
+  }
+
+  const reason = "Enter your wallet passphrase to view the recovery phrase.";
+  let errorText: string | null = null;
+  let revealed: RevealMnemonicResponse | null = null;
+
+  for (;;) {
+    let passphrase = "";
+    if (!needsMigration) {
+      const value = await promptPassphrase(reason, { errorText });
+      if (value == null) return;
+      if (!value) {
+        errorText = "Enter your passphrase.";
+        continue;
+      }
+      passphrase = value;
+    }
+
+    showLoading("Decrypting recovery phrase…");
+    try {
+      revealed = await invoke<RevealMnemonicResponse>("reveal_mnemonic", {
+        req: { passphrase },
+      });
+      break;
+    } catch (e) {
+      const message = String(e);
+      if (/incorrect passphrase/i.test(message)) {
+        errorText = "That passphrase is not correct.";
+        continue;
+      }
+      setError(message);
+      return;
+    } finally {
+      hideLoading();
+    }
+  }
+
+  if (!revealed) return;
+
+  const phrase = revealed.phrase;
+  const kindLabel = revealed.kind;
+  const aezeedPass = revealed.aezeed_passphrase?.trim() || null;
+  revealed.phrase = "";
+  if (revealed.aezeed_passphrase) revealed.aezeed_passphrase = "";
+
+  await openModal({
+    title: "Recovery phrase",
+    wide: true,
+    build: (body) => {
+      appendParagraph(
+        body,
+        `This is your ${kindLabel}. Write it down and keep it offline. Anyone with these words can spend your funds.`,
+        "lede",
+      );
+      if (kindLabel === "extended private key") {
+        const mono = document.createElement("p");
+        mono.className = "mono";
+        mono.style.wordBreak = "break-all";
+        mono.textContent = phrase;
+        body.appendChild(mono);
+      } else {
+        appendMnemonicGrid(body, phrase);
+      }
+      if (aezeedPass) {
+        appendParagraph(
+          body,
+          "This aezeed seed was stored with a cipher-seed passphrase. You need both the words and that passphrase to restore.",
+          "hint",
+        );
+        const label = document.createElement("label");
+        label.className = "field";
+        const caption = document.createElement("span");
+        caption.className = "field-label";
+        caption.textContent = "aezeed cipher-seed passphrase";
+        const value = document.createElement("input");
+        value.type = "text";
+        value.className = "mono";
+        value.readOnly = true;
+        value.value = aezeedPass;
+        label.append(caption, value);
+        body.appendChild(label);
+      }
+    },
+    actions: [{ id: "hide", label: "Hide phrase", kind: "primary" }],
+  });
 }
 
 /* ---------------------------------------------------------------------------
@@ -2263,6 +2393,7 @@ function updateBusyUi() {
   el.btnMwebSend.disabled = busy;
   el.btnPegout.disabled = busy;
   el.btnResyncMweb.disabled = busy;
+  el.btnRevealMnemonic.disabled = busy;
 
   el.syncLabel.textContent = sending ? "Sending…" : syncing ? "Syncing…" : "Sync";
   el.syncDot.dataset.state = busy ? "busy" : syncState;
@@ -4034,6 +4165,7 @@ async function runSync(opts: { quiet: boolean }): Promise<boolean> {
 }
 
 async function lockWallet(statusMessage = "Wallet locked.") {
+  closeModal(null);
   stopAutoSync();
   stopMwebProgressPolling();
   syncing = false;
@@ -5074,6 +5206,10 @@ el.btnSaveSettings.addEventListener("click", async () => {
   } catch (e) {
     setError(String(e));
   }
+});
+
+el.btnRevealMnemonic.addEventListener("click", () => {
+  void viewRecoveryPhrase().catch((e) => setError(String(e)));
 });
 
 el.btnLock.addEventListener("click", () => {

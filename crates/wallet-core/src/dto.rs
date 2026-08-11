@@ -210,6 +210,27 @@ pub struct UnlockRequest {
     pub passphrase: String,
 }
 
+/// Request to re-reveal the stored recovery secret after passphrase confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevealMnemonicRequest {
+    pub passphrase: String,
+}
+
+/// Recovery material for display after a successful [`RevealMnemonicRequest`].
+///
+/// Storage tags (`aezeed:`, `xprv:`, …) are stripped. An aezeed cipher-seed
+/// passphrase is returned separately when one was stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevealMnemonicResponse {
+    /// Human-readable kind (`BIP39 mnemonic`, `aezeed seed`, `extended private key`).
+    pub kind: String,
+    /// Words or extended private key string suitable for backup / restore.
+    pub phrase: String,
+    /// Present when the seed is aezeed and was stored with a non-default cipher passphrase.
+    #[serde(default)]
+    pub aezeed_passphrase: Option<String>,
+}
+
 /// Request to migrate a plaintext mnemonic to an encrypted store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrateEncryptRequest {
