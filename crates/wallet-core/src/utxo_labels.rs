@@ -15,7 +15,7 @@ pub const UTXO_LABELS_FILE: &str = "utxo_labels.json";
 pub struct UtxoLabelsFile {
     #[serde(default = "default_version")]
     pub version: u32,
-    /// Keyed by `txid:vout`.
+    /// Keyed by `txid:vout` (public) or 64-char hex MWEB output id (private).
     #[serde(default)]
     pub labels: HashMap<String, String>,
 }
@@ -47,15 +47,25 @@ pub fn write_labels(data_dir: &Path, file: &UtxoLabelsFile) -> Result<(), Wallet
     Ok(())
 }
 
+fn is_coin_id(key: &str) -> bool {
+    if key.contains(':') {
+        let (txid, vout) = key.split_once(':').unwrap_or(("", ""));
+        return !txid.is_empty() && !vout.is_empty();
+    }
+    crate::mweb_frozen::is_output_id_hex(key)
+}
+
 /// Set or clear a label. Empty `label` deletes the entry.
+///
+/// `outpoint` is a public `txid:vout` or a 64-character MWEB output-id hex.
 pub fn set_label(data_dir: &Path, outpoint: &str, label: &str) -> Result<(), WalletError> {
     let outpoint = outpoint.trim();
     if outpoint.is_empty() {
         return Err(WalletError::Meta("outpoint required for label".into()));
     }
-    if !outpoint.contains(':') {
+    if !is_coin_id(outpoint) {
         return Err(WalletError::Meta(
-            "outpoint must look like txid:vout".into(),
+            "coin id must look like txid:vout or a 32-byte hex MWEB output id".into(),
         ));
     }
     let mut file = read_labels(data_dir)?;
@@ -92,6 +102,17 @@ mod tests {
             Some("Exchange")
         );
         set_label(dir.path(), "abcd:0", "").unwrap();
+        assert!(!labels_path(dir.path()).is_file());
+    }
+
+    #[test]
+    fn mweb_output_id_round_trip() {
+        let dir = tempdir().unwrap();
+        let id = "cd".repeat(32);
+        set_label(dir.path(), &id, " peg-out prep ").unwrap();
+        let file = read_labels(dir.path()).unwrap();
+        assert_eq!(file.labels.get(&id).map(String::as_str), Some("peg-out prep"));
+        set_label(dir.path(), &id, "").unwrap();
         assert!(!labels_path(dir.path()).is_file());
     }
 }

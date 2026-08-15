@@ -32,7 +32,7 @@ The LitecoinDevKit/bdk, bdk_wallet, and rust-litecoin forks are pinned by rev di
 | Path | Role |
 | --- | --- |
 | `crates/wallet-core` | BDK boundary, DTOs, encrypted secrets, Electrum, MWEB |
-| `crates/wallet-cli` | Smoke CLI: create → sync → address → send |
+| `crates/wallet-cli` | Smoke CLI: create → sync → address → send; MWEB inspect (`combined-summary`, `mweb-unspent`)
 | `src-tauri` | Tauri 2 commands → `wallet-core` |
 | `ui` | Onboarding / home / settings UI |
 
@@ -62,7 +62,17 @@ cargo run -p wallet-cli -- --data-dir .wallet-data --passphrase '…' send \
   --address <ltc1…> --amount-sats 5000 --fee-rate 1
 ```
 
-Use `--network testnet` for testnet. Passphrase can also come from `WALLET_PASSPHRASE`.
+Use `--network testnet` for testnet. Passphrase can also come from `WALLET_PASSPHRASE`. Quit the GUI before CLI unlock (exclusive data-dir lock).
+
+MWEB inspect (no secrets; quit the app first):
+
+```bash
+DATA_DIR="$HOME/Library/Application Support/com.indigonakamoto.ltc-wallet"
+cargo run -p wallet-cli -- --data-dir "$DATA_DIR" combined-summary
+cargo run -p wallet-cli -- --data-dir "$DATA_DIR" mweb-unspent
+```
+
+Lab-only: `mweb-coinswapd-env --out FILE` writes scan/spend hex to a chmod 600 file and never prints them. That is operator plumbing for an external mixnet, not a CoinSwap UI in this app.
 
 ## Packaging
 

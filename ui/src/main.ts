@@ -77,20 +77,34 @@ type MetadataImportResult = {
   contacts_upserted: number;
   tx_labels_upserted: number;
   utxo_labels_upserted: number;
+  split_txids_upserted?: number;
+  mweb_frozen_upserted?: number;
 };
 
 type MwebSendPreview = {
   amount_sats: number;
   fee_sats: number;
+  creates_change?: boolean;
 };
 
 type PegoutPreview = {
   amount_sats: number;
   fee_sats: number;
   dust_sats: number;
+  creates_change?: boolean;
+  output_count?: number;
+  output_amounts?: number[];
+  fee_output_index?: number | null;
 };
 
-type TxKind = "transparent" | "pegin" | "pegout" | "mweb-send" | "mweb-receive";
+type TxKind =
+  | "transparent"
+  | "pegin"
+  | "pegout"
+  | "mweb-send"
+  | "mweb-receive"
+  | "split"
+  | "mweb-split";
 
 type ContactKind = "public" | "private";
 
@@ -112,6 +126,38 @@ type UtxoRecord = {
   label?: string;
 };
 
+type MwebUtxoRecord = {
+  output_id: string;
+  amount_sats: number;
+  confirmations: number;
+  mature: boolean;
+  maturity_blocks_left?: number;
+  locked?: boolean;
+  label?: string;
+};
+
+type SplitOutput = {
+  amount_sats: number;
+  is_change?: boolean;
+};
+
+type SplitPreview = {
+  input_sats: number;
+  outputs: SplitOutput[];
+  fee_sats: number;
+  fee_rate_sat_vb: number;
+  change_sats: number;
+  creates_change?: boolean;
+};
+
+type SplitResult = {
+  txid: string;
+  fee_sats: number;
+  output_count: number;
+};
+
+type SplitChain = "public" | "private";
+
 type TxRecord = {
   txid: string;
   net_sats: number;
@@ -130,6 +176,8 @@ const TX_KIND_LABELS: Record<TxKind, string> = {
   pegout: "peg-out",
   "mweb-send": "mweb send",
   "mweb-receive": "mweb receive",
+  split: "split",
+  "mweb-split": "split",
 };
 
 type MwebScheme = "litecoin-core" | "lip0004" | "mwebd";
@@ -289,6 +337,12 @@ const HIDDEN_AMOUNT = "••••";
 const MAX_TX_LABEL_CHARS = 140;
 
 const DUST_LITOSHIS = 2940;
+const MAX_SPLIT_OUTPUTS = 50;
+const MIN_EQUAL_SPLIT = 2;
+const SPLIT_PREFS_KEY = "ltc-split-prefs";
+const SPLIT_DENOMS_LTC = [0.1, 0.25, 0.5, 1, 5, 10, 20, 50, 100];
+const SPLIT_DENOMS_SATS = SPLIT_DENOMS_LTC.map((ltc) => Math.round(ltc * 100_000_000));
+const PEGOUT_PREP_SATS = new Set([5, 10, 20, 50].map((ltc) => ltc * 100_000_000));
 const AUTO_SYNC_MS = 60_000;
 const QR_CSS_SIZE = 176;
 const RECENT_TX_COUNT = 6;
@@ -499,10 +553,20 @@ const el = {
   mwebSendAmountPresets: document.querySelector<HTMLElement>("#mweb-send-amount-presets")!,
   mwebSendNote: document.querySelector<HTMLInputElement>("#mweb-send-note")!,
   mwebSendDrain: document.querySelector<HTMLInputElement>("#mweb-send-drain")!,
+  mwebSendCoinControl: document.querySelector<HTMLDetailsElement>("#mweb-send-coin-control")!,
+  mwebSendCoinControlSum: document.querySelector<HTMLElement>("#mweb-send-coin-control-sum")!,
+  mwebSendUtxoList: document.querySelector<HTMLUListElement>("#mweb-send-utxo-list")!,
+  mwebSendUtxoEmpty: document.querySelector<HTMLElement>("#mweb-send-utxo-empty")!,
+  btnRefreshMwebSendUtxos: document.querySelector<HTMLButtonElement>("#btn-refresh-mweb-send-utxos")!,
   pegoutAmount: document.querySelector<HTMLInputElement>("#pegout-amount")!,
   pegoutAmountPresets: document.querySelector<HTMLElement>("#pegout-amount-presets")!,
   pegoutNote: document.querySelector<HTMLInputElement>("#pegout-note")!,
   pegoutDrain: document.querySelector<HTMLInputElement>("#pegout-drain")!,
+  pegoutCoinControl: document.querySelector<HTMLDetailsElement>("#pegout-coin-control")!,
+  pegoutCoinControlSum: document.querySelector<HTMLElement>("#pegout-coin-control-sum")!,
+  pegoutUtxoList: document.querySelector<HTMLUListElement>("#pegout-utxo-list")!,
+  pegoutUtxoEmpty: document.querySelector<HTMLElement>("#pegout-utxo-empty")!,
+  btnRefreshPegoutUtxos: document.querySelector<HTMLButtonElement>("#btn-refresh-pegout-utxos")!,
   btnCreate: document.querySelector<HTMLButtonElement>("#btn-create")!,
   btnRestore: document.querySelector<HTMLButtonElement>("#btn-restore")!,
   btnMnemonicToVerify: document.querySelector<HTMLButtonElement>("#btn-mnemonic-to-verify")!,
@@ -532,6 +596,15 @@ const el = {
   coinsUtxoList: document.querySelector<HTMLUListElement>("#coins-utxo-list")!,
   coinsUtxoEmpty: document.querySelector<HTMLElement>("#coins-utxo-empty")!,
   coinsSum: document.querySelector<HTMLElement>("#coins-sum")!,
+  coinsMwebList: document.querySelector<HTMLUListElement>("#coins-mweb-list")!,
+  coinsMwebEmpty: document.querySelector<HTMLElement>("#coins-mweb-empty")!,
+  coinsMwebSum: document.querySelector<HTMLElement>("#coins-mweb-sum")!,
+  coinsSegPublic: document.querySelector<HTMLButtonElement>("#coins-seg-public")!,
+  coinsSegPrivate: document.querySelector<HTMLButtonElement>("#coins-seg-private")!,
+  coinsPublic: document.querySelector<HTMLElement>("#coins-public")!,
+  coinsPrivate: document.querySelector<HTMLElement>("#coins-private")!,
+  coinsBalancePublic: document.querySelector<HTMLElement>("#coins-balance-public")!,
+  coinsBalancePrivate: document.querySelector<HTMLElement>("#coins-balance-private")!,
   btnRefreshCoins: document.querySelector<HTMLButtonElement>("#btn-refresh-coins")!,
   electrumPresets: document.querySelector<HTMLElement>("#electrum-presets")!,
   electrumPresetButtons: document.querySelector<HTMLElement>("#electrum-preset-buttons")!,
@@ -574,9 +647,12 @@ let historyFilter: HistoryFilter = "all";
 let historySearchQuery = "";
 let contactsCache: ContactRecord[] = [];
 let utxoCache: UtxoRecord[] = [];
+let mwebUtxoCache: MwebUtxoRecord[] = [];
 let lastElectrumUrl: string | null = null;
 const sendSelectedOutpoints = new Set<string>();
 const peginSelectedOutpoints = new Set<string>();
+const mwebSendSelectedIds = new Set<string>();
+const pegoutSelectedIds = new Set<string>();
 /** Local notes keyed by txid/wtxid (never sent to litview). */
 let txLabels: Record<string, string> = {};
 let autoSyncTimer: number | null = null;
@@ -615,7 +691,7 @@ function isChainTxid(id: string): boolean {
 
 /** litview indexes transparent chain txs; peg-ins have a public txid. Pure MWEB ids do not. */
 function txKindExplorable(kind: TxKind): boolean {
-  return kind === "transparent" || kind === "pegin";
+  return kind === "transparent" || kind === "pegin" || kind === "split";
 }
 
 async function openExplorerForTxid(txid: string) {
@@ -1521,6 +1597,7 @@ type SwapDirection = "in" | "out";
 
 let sendMode: SegMode = "public";
 let receiveMode: SegMode = "public";
+let coinsMode: SegMode = "public";
 let swapDirection: SwapDirection = "in";
 
 function applySeg(
@@ -1546,6 +1623,13 @@ function applySegModes() {
     receiveMode === "public",
   );
   applySeg(el.swapSegIn, el.swapIn, el.swapSegOut, el.swapOut, swapDirection === "in");
+  applySeg(
+    el.coinsSegPublic,
+    el.coinsPublic,
+    el.coinsSegPrivate,
+    el.coinsPrivate,
+    coinsMode === "public",
+  );
 }
 
 el.sendSegPublic.addEventListener("click", () => {
@@ -1563,6 +1647,15 @@ el.receiveSegPublic.addEventListener("click", () => {
 el.receiveSegPrivate.addEventListener("click", () => {
   receiveMode = "private";
   applySegModes();
+});
+el.coinsSegPublic.addEventListener("click", () => {
+  coinsMode = "public";
+  applySegModes();
+});
+el.coinsSegPrivate.addEventListener("click", () => {
+  coinsMode = "private";
+  applySegModes();
+  void refreshUtxos();
 });
 el.swapSegIn.addEventListener("click", () => {
   swapDirection = "in";
@@ -2377,7 +2470,7 @@ function updateBusyUi() {
   el.peginNote.disabled = busy;
   el.mwebSendAmount.disabled = busy;
   el.mwebSendNote.disabled = busy;
-  el.pegoutAmount.disabled = busy;
+  el.pegoutAmount.disabled = busy || pegoutLocksAmount();
   el.pegoutNote.disabled = busy;
   for (const group of [
     el.sendAmountPresets,
@@ -2386,7 +2479,11 @@ function updateBusyUi() {
     el.pegoutAmountPresets,
   ]) {
     for (const btn of group.querySelectorAll<HTMLButtonElement>("button")) {
-      btn.disabled = busy;
+      const pegoutPctLocked =
+        group === el.pegoutAmountPresets &&
+        pegoutSelectedIds.size > 0 &&
+        btn.dataset.pct !== "max";
+      btn.disabled = busy || pegoutPctLocked;
     }
   }
   el.btnPegin.disabled = busy;
@@ -3070,6 +3167,8 @@ function renderCombined(c: CombinedSummary) {
 
   // Private Send shows only spendable — maturing must never look sendable.
   el.sendBalancePrivate.textContent = formatAmount(c.mweb_confirmed_sats);
+  el.coinsBalancePublic.textContent = formatAmount(c.transparent.confirmed_sats);
+  el.coinsBalancePrivate.textContent = formatAmount(c.mweb_confirmed_sats);
   let privateChip = formatAmount(c.mweb_confirmed_sats);
   if (c.mweb_immature_sats > 0) {
     privateChip += ` · maturing ${formatAmount(c.mweb_immature_sats)}`;
@@ -3127,13 +3226,19 @@ function formatSignedAmount(tx: TxRecord): string {
 }
 
 function isPrivateTxKind(kind: TxKind): boolean {
-  return kind === "pegin" || kind === "pegout" || kind === "mweb-send" || kind === "mweb-receive";
+  return (
+    kind === "pegin" ||
+    kind === "pegout" ||
+    kind === "mweb-send" ||
+    kind === "mweb-receive" ||
+    kind === "mweb-split"
+  );
 }
 
 function filterHistoryRecords(txs: TxRecord[]): TxRecord[] {
   const q = historySearchQuery.trim().toLowerCase();
   return txs.filter((tx) => {
-    if (historyFilter === "public" && tx.kind !== "transparent") return false;
+    if (historyFilter === "public" && tx.kind !== "transparent" && tx.kind !== "split") return false;
     if (historyFilter === "private" && !isPrivateTxKind(tx.kind)) return false;
     if (historyFilter === "pending" && tx.confirmations !== 0) return false;
     if (!q) return true;
@@ -4671,9 +4776,15 @@ function renderUtxoList(panel: CoinControlPanel) {
 async function persistUtxoLabel(outpoint: string, label: string) {
   try {
     await invoke("set_utxo_label", { req: { outpoint, label } });
-    const row = utxoCache.find((u) => u.outpoint === outpoint);
-    if (row) row.label = label.trim();
+    const note = label.trim();
+    const pub = utxoCache.find((u) => u.outpoint === outpoint);
+    if (pub) pub.label = note;
+    const priv = mwebUtxoCache.find((c) => c.output_id === outpoint);
+    if (priv) priv.label = note;
     renderCoinsList();
+    renderMwebCoinsList();
+    renderMwebControlList(mwebSendCoinPanel);
+    renderMwebControlList(pegoutCoinPanel);
   } catch (e) {
     setStatus(String(e), "error");
   }
@@ -4712,12 +4823,34 @@ function renderCoinsList() {
       void persistUtxoLabel(utxo.outpoint, labelInput.value);
     });
     main.append(amt, meta, id, labelInput);
+    const actions = document.createElement("div");
+    actions.className = "split-actions";
     const freeze = document.createElement("button");
     freeze.type = "button";
     freeze.className = "btn btn-ghost btn-sm utxo-freeze";
     freeze.textContent = utxo.locked ? "Unfreeze" : "Freeze";
     freeze.addEventListener("click", () => void toggleUtxoLocked(utxo));
-    li.append(main, freeze);
+    const split = document.createElement("button");
+    split.type = "button";
+    split.className = "btn btn-ghost btn-sm";
+    split.textContent = "Split";
+    const splitBlocked =
+      utxo.locked || utxo.confirmations === 0;
+    split.disabled = splitBlocked;
+    split.title = utxo.locked
+      ? "Unfreeze to split."
+      : utxo.confirmations === 0
+        ? "Split is disabled until the coin is confirmed."
+        : "Split this coin into multiple outputs";
+    split.addEventListener("click", () => {
+      void openSplitModal({
+        chain: "public",
+        id: utxo.outpoint,
+        amount_sats: utxo.amount_sats,
+      });
+    });
+    actions.append(freeze, split);
+    li.append(main, actions);
     el.coinsUtxoList.appendChild(li);
   }
   if (utxoCache.length === 0) {
@@ -4728,6 +4861,90 @@ function renderCoinsList() {
     el.coinsSum.textContent = `${utxoCache.length} coin${
       utxoCache.length === 1 ? "" : "s"
     }${frozen ? ` · ${frozen} frozen` : ""}`;
+  }
+}
+
+function renderMwebCoinsList() {
+  el.coinsMwebList.textContent = "";
+  el.coinsMwebEmpty.hidden = mwebUtxoCache.length > 0;
+  let immature = 0;
+  let frozen = 0;
+  for (const coin of mwebUtxoCache) {
+    if (!coin.mature) immature += 1;
+    if (coin.locked) frozen += 1;
+    const li = document.createElement("li");
+    li.className = coin.locked || !coin.mature ? "utxo-row is-locked" : "utxo-row";
+    const main = document.createElement("div");
+    main.className = "utxo-main";
+    const amt = document.createElement("span");
+    amt.textContent = formatAmountPlain(coin.amount_sats);
+    const meta = document.createElement("span");
+    meta.className = "utxo-meta";
+    const left = coin.maturity_blocks_left ?? 0;
+    const conf =
+      coin.confirmations === 0
+        ? "pending"
+        : `${coin.confirmations.toLocaleString("en-US")} conf`;
+    const labelBit = coin.label ? ` · ${coin.label}` : "";
+    meta.textContent = coin.mature
+      ? `${conf}${coin.locked ? " · frozen" : ""}${labelBit}`
+      : coin.confirmations === 0
+        ? "pending · not yet spendable"
+        : `maturing · ${left} block${left === 1 ? "" : "s"} left`;
+    const id = document.createElement("span");
+    id.className = "utxo-id";
+    id.textContent = coin.output_id;
+    const labelInput = document.createElement("input");
+    labelInput.type = "text";
+    labelInput.className = "utxo-label-input";
+    labelInput.placeholder = "Label (optional)";
+    labelInput.maxLength = MAX_TX_LABEL_CHARS;
+    labelInput.value = coin.label ?? "";
+    labelInput.addEventListener("change", () => {
+      void persistUtxoLabel(coin.output_id, labelInput.value);
+    });
+    main.append(amt, meta, id, labelInput);
+    const actions = document.createElement("div");
+    actions.className = "split-actions";
+    const freeze = document.createElement("button");
+    freeze.type = "button";
+    freeze.className = "btn btn-ghost btn-sm utxo-freeze";
+    freeze.textContent = coin.locked ? "Unfreeze" : "Freeze";
+    freeze.disabled = !coin.mature && !coin.locked;
+    freeze.addEventListener("click", () => void toggleMwebLocked(coin));
+    const split = document.createElement("button");
+    split.type = "button";
+    split.className = "btn btn-ghost btn-sm";
+    split.textContent = "Split";
+    const splitBlocked = !!coin.locked || !coin.mature;
+    split.disabled = splitBlocked;
+    split.title = coin.locked
+      ? "Unfreeze to split."
+      : coin.mature
+        ? "Split this private coin into multiple outputs"
+        : left > 0
+          ? `Matures in ${left} block${left === 1 ? "" : "s"}.`
+          : "Cannot spend privately until confirmed.";
+    split.addEventListener("click", () => {
+      void openSplitModal({
+        chain: "private",
+        id: coin.output_id,
+        amount_sats: coin.amount_sats,
+      });
+    });
+    actions.append(freeze, split);
+    li.append(main, actions);
+    el.coinsMwebList.appendChild(li);
+  }
+  if (mwebUtxoCache.length === 0) {
+    el.coinsMwebSum.hidden = true;
+    el.coinsMwebSum.textContent = "";
+  } else {
+    el.coinsMwebSum.hidden = false;
+    const bits = [`${mwebUtxoCache.length} coin${mwebUtxoCache.length === 1 ? "" : "s"}`];
+    if (immature) bits.push(`${immature} maturing`);
+    if (frozen) bits.push(`${frozen} frozen`);
+    el.coinsMwebSum.textContent = bits.join(" · ");
   }
 }
 
@@ -4749,11 +4966,115 @@ const peginCoinPanel: CoinControlPanel = {
   selected: peginSelectedOutpoints,
 };
 
+const mwebSendCoinPanel: CoinControlPanel = {
+  details: el.mwebSendCoinControl,
+  sum: el.mwebSendCoinControlSum,
+  list: el.mwebSendUtxoList,
+  empty: el.mwebSendUtxoEmpty,
+  drain: el.mwebSendDrain,
+  selected: mwebSendSelectedIds,
+};
+
+const pegoutCoinPanel: CoinControlPanel = {
+  details: el.pegoutCoinControl,
+  sum: el.pegoutCoinControlSum,
+  list: el.pegoutUtxoList,
+  empty: el.pegoutUtxoEmpty,
+  drain: el.pegoutDrain,
+  selected: pegoutSelectedIds,
+};
+
 function pruneSelectedOutpoints(selected: Set<string>) {
   const live = new Set(utxoCache.map((u) => u.outpoint));
   for (const op of Array.from(selected)) {
     if (!live.has(op)) selected.delete(op);
   }
+}
+
+function pruneSelectedMwebIds(selected: Set<string>) {
+  const live = new Set(mwebUtxoCache.map((c) => c.output_id));
+  for (const id of Array.from(selected)) {
+    if (!live.has(id)) selected.delete(id);
+  }
+}
+
+function updateMwebControlSum(panel: CoinControlPanel) {
+  if (panel.selected.size === 0) {
+    panel.sum.hidden = true;
+    panel.sum.textContent = "";
+    return;
+  }
+  let sum = 0;
+  for (const coin of mwebUtxoCache) {
+    if (panel.selected.has(coin.output_id)) sum += coin.amount_sats;
+  }
+  panel.sum.hidden = false;
+  panel.sum.textContent = `Selected ${panel.selected.size} coin${
+    panel.selected.size === 1 ? "" : "s"
+  } · ${formatAmountPlain(sum)}`;
+}
+
+function renderMwebControlList(panel: CoinControlPanel) {
+  panel.list.textContent = "";
+  panel.empty.hidden = mwebUtxoCache.length > 0;
+  for (const coin of mwebUtxoCache) {
+    const li = document.createElement("li");
+    const blocked = !!coin.locked || !coin.mature;
+    li.className = blocked ? "utxo-row is-locked" : "utxo-row";
+
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.disabled = blocked;
+    check.checked = panel.selected.has(coin.output_id);
+    const left = coin.maturity_blocks_left ?? 0;
+    check.title = coin.locked
+      ? "Unfreeze to spend."
+      : !coin.mature
+        ? coin.confirmations === 0
+          ? "Cannot spend privately until confirmed."
+          : `Matures in ${left} block${left === 1 ? "" : "s"}.`
+        : "Include this coin";
+    check.addEventListener("change", () => {
+      if (check.checked) panel.selected.add(coin.output_id);
+      else panel.selected.delete(coin.output_id);
+      updateMwebControlSum(panel);
+      if (panel === mwebSendCoinPanel) {
+        const preset = pressedAmountPreset(el.mwebSendAmountPresets);
+        if (preset != null) applyMwebSendAmountPreset(preset);
+      } else if (panel === pegoutCoinPanel) {
+        syncPegoutSelectionMode();
+      }
+    });
+
+    const main = document.createElement("div");
+    main.className = "utxo-main";
+    const amt = document.createElement("span");
+    amt.textContent = formatAmountPlain(coin.amount_sats);
+    const meta = document.createElement("span");
+    meta.className = "utxo-meta";
+    const conf =
+      coin.confirmations === 0
+        ? "pending"
+        : `${coin.confirmations.toLocaleString("en-US")} conf`;
+    const labelBit = coin.label ? ` · ${coin.label}` : "";
+    meta.textContent = `${conf}${coin.locked ? " · frozen" : ""}${
+      coin.mature ? "" : " · not spendable"
+    }${labelBit}`;
+    const id = document.createElement("span");
+    id.className = "utxo-id";
+    id.textContent = coin.output_id;
+    main.append(amt, meta, id);
+
+    const freeze = document.createElement("button");
+    freeze.type = "button";
+    freeze.className = "btn btn-ghost btn-sm utxo-freeze";
+    freeze.textContent = coin.locked ? "Unfreeze" : "Freeze";
+    freeze.addEventListener("click", () => void toggleMwebLocked(coin));
+
+    li.append(check, main, freeze);
+    panel.list.appendChild(li);
+  }
+  updateMwebControlSum(panel);
 }
 
 async function refreshUtxos() {
@@ -4762,11 +5083,22 @@ async function refreshUtxos() {
   } catch {
     utxoCache = [];
   }
+  try {
+    mwebUtxoCache = (await invoke<MwebUtxoRecord[]>("list_mweb_unspent")) ?? [];
+  } catch {
+    mwebUtxoCache = [];
+  }
   pruneSelectedOutpoints(sendSelectedOutpoints);
   pruneSelectedOutpoints(peginSelectedOutpoints);
+  pruneSelectedMwebIds(mwebSendSelectedIds);
+  pruneSelectedMwebIds(pegoutSelectedIds);
   renderUtxoList(sendCoinPanel);
   renderUtxoList(peginCoinPanel);
+  renderMwebControlList(mwebSendCoinPanel);
+  renderMwebControlList(pegoutCoinPanel);
   renderCoinsList();
+  renderMwebCoinsList();
+  reapplyPressedAmountPresets();
 }
 
 async function toggleUtxoLocked(utxo: UtxoRecord) {
@@ -4785,14 +5117,459 @@ async function toggleUtxoLocked(utxo: UtxoRecord) {
   }
 }
 
+async function toggleMwebLocked(coin: MwebUtxoRecord) {
+  try {
+    await invoke("set_mweb_utxo_locked", {
+      req: { output_id: coin.output_id, locked: !coin.locked },
+    });
+    if (!coin.locked) {
+      mwebSendSelectedIds.delete(coin.output_id);
+      pegoutSelectedIds.delete(coin.output_id);
+    }
+    await refreshUtxos();
+    setStatus(coin.locked ? "Coin unfrozen." : "Coin frozen.", "success");
+  } catch (e) {
+    setStatus(String(e), "error");
+  }
+}
+
+type SplitPrefs = {
+  mode: "equal" | "denoms";
+  equalCount: number;
+  qtys: number[];
+};
+
+function defaultSplitPrefs(): SplitPrefs {
+  return {
+    mode: "equal",
+    equalCount: 2,
+    qtys: SPLIT_DENOMS_SATS.map(() => 0),
+  };
+}
+
+function loadSplitPrefs(): SplitPrefs {
+  const fallback = defaultSplitPrefs();
+  try {
+    const raw = localStorage.getItem(SPLIT_PREFS_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<SplitPrefs>;
+    const qtys = Array.isArray(parsed.qtys)
+      ? SPLIT_DENOMS_SATS.map((_, i) => Math.max(0, Math.floor(Number(parsed.qtys?.[i]) || 0)))
+      : fallback.qtys;
+    const equalCount = Math.min(
+      MAX_SPLIT_OUTPUTS,
+      Math.max(MIN_EQUAL_SPLIT, Math.floor(Number(parsed.equalCount) || 2)),
+    );
+    return {
+      mode: parsed.mode === "denoms" ? "denoms" : "equal",
+      equalCount,
+      qtys,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveSplitPrefs(prefs: SplitPrefs) {
+  try {
+    localStorage.setItem(SPLIT_PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* localStorage unavailable */
+  }
+}
+
+function truncateId(id: string): string {
+  const t = id.trim();
+  if (t.length <= 20) return t;
+  return `${t.slice(0, 8)}…${t.slice(-8)}`;
+}
+
+function denomAmountsFromQtys(qtys: number[]): number[] {
+  const amounts: number[] = [];
+  for (let i = 0; i < SPLIT_DENOMS_SATS.length; i++) {
+    const n = qtys[i] ?? 0;
+    for (let k = 0; k < n && amounts.length < MAX_SPLIT_OUTPUTS; k++) {
+      amounts.push(SPLIT_DENOMS_SATS[i]!);
+    }
+  }
+  return amounts;
+}
+
+function greedyFillQtys(available: number): number[] {
+  const qtys = SPLIT_DENOMS_SATS.map(() => 0);
+  let remaining = available;
+  let total = 0;
+  for (let i = SPLIT_DENOMS_SATS.length - 1; i >= 0; i--) {
+    const denom = SPLIT_DENOMS_SATS[i]!;
+    while (remaining >= denom && total < MAX_SPLIT_OUTPUTS) {
+      qtys[i] += 1;
+      remaining -= denom;
+      total += 1;
+    }
+  }
+  return qtys;
+}
+
+async function openSplitModal(coin: {
+  chain: SplitChain;
+  id: string;
+  amount_sats: number;
+}) {
+  const prefs = loadSplitPrefs();
+  const live: { preview: SplitPreview | null; error: string | null } = {
+    preview: null,
+    error: null,
+  };
+  let previewTimer: number | null = null;
+
+  const feeRateDefault = selectedFeeRateSatVb ?? 1;
+
+  for (;;) {
+    const result = await openModal({
+      title: "Split coin",
+      wide: true,
+      build: (body) => {
+        const header = document.createElement("p");
+        header.className = "lede";
+        const badge = coin.chain === "public" ? "Public" : "Private · MWEB";
+        header.textContent = `${badge} · ${formatAmountPlain(coin.amount_sats)} · ${formatLitoshisPlain(coin.amount_sats)}`;
+        body.appendChild(header);
+        const idLine = document.createElement("p");
+        idLine.className = "hint mono";
+        idLine.textContent = truncateId(coin.id);
+        idLine.title = coin.id;
+        body.appendChild(idLine);
+
+        const modeRow = document.createElement("div");
+        modeRow.className = "split-mode-row";
+        const equalBtn = document.createElement("button");
+        equalBtn.type = "button";
+        equalBtn.className = "btn btn-sm";
+        equalBtn.textContent = "Equal";
+        const denomsBtn = document.createElement("button");
+        denomsBtn.type = "button";
+        denomsBtn.className = "btn btn-sm";
+        denomsBtn.textContent = "Denominations";
+        modeRow.append(equalBtn, denomsBtn);
+        body.appendChild(modeRow);
+
+        const equalPanel = document.createElement("div");
+        const equalLabel = document.createElement("label");
+        equalLabel.className = "field";
+        const equalCaption = document.createElement("span");
+        equalCaption.className = "field-label";
+        equalCaption.textContent = "Number of outputs";
+        const equalInput = document.createElement("input");
+        equalInput.type = "number";
+        equalInput.min = String(MIN_EQUAL_SPLIT);
+        equalInput.max = String(MAX_SPLIT_OUTPUTS);
+        equalInput.step = "1";
+        equalInput.value = String(prefs.equalCount);
+        equalLabel.append(equalCaption, equalInput);
+        const equalHint = document.createElement("p");
+        equalHint.className = "hint";
+        equalPanel.append(equalLabel, equalHint);
+
+        const denomsPanel = document.createElement("div");
+        const denomHead = document.createElement("div");
+        denomHead.className = "split-denom-head";
+        const denomTitle = document.createElement("span");
+        denomTitle.className = "field-label";
+        denomTitle.textContent = "Denominations (LTC)";
+        const denomBtns = document.createElement("div");
+        const clearBtn = document.createElement("button");
+        clearBtn.type = "button";
+        clearBtn.className = "btn btn-ghost btn-sm";
+        clearBtn.textContent = "Clear";
+        const fillBtn = document.createElement("button");
+        fillBtn.type = "button";
+        fillBtn.className = "btn btn-ghost btn-sm";
+        fillBtn.textContent = "Fill";
+        denomBtns.append(clearBtn, fillBtn);
+        denomHead.append(denomTitle, denomBtns);
+        const denomList = document.createElement("ul");
+        denomList.className = "split-denom-list";
+        const qtyInputs: HTMLInputElement[] = [];
+        for (let i = 0; i < SPLIT_DENOMS_LTC.length; i++) {
+          const row = document.createElement("li");
+          row.className = "split-denom-row";
+          if (coin.chain === "private" && PEGOUT_PREP_SATS.has(SPLIT_DENOMS_SATS[i]!)) {
+            row.classList.add("is-pegout-prep");
+          }
+          const label = document.createElement("span");
+          label.className = "split-denom-label";
+          label.textContent = String(SPLIT_DENOMS_LTC[i]);
+          const stepper = document.createElement("div");
+          stepper.className = "split-stepper";
+          const minus = document.createElement("button");
+          minus.type = "button";
+          minus.className = "btn btn-ghost btn-sm";
+          minus.textContent = "−";
+          const qty = document.createElement("input");
+          qty.type = "number";
+          qty.min = "0";
+          qty.max = String(MAX_SPLIT_OUTPUTS);
+          qty.step = "1";
+          qty.value = String(prefs.qtys[i] ?? 0);
+          const plus = document.createElement("button");
+          plus.type = "button";
+          plus.className = "btn btn-ghost btn-sm";
+          plus.textContent = "+";
+          minus.addEventListener("click", () => {
+            qty.value = String(Math.max(0, (Number(qty.value) || 0) - 1));
+            qty.dispatchEvent(new Event("input"));
+          });
+          plus.addEventListener("click", () => {
+            qty.value = String(Math.min(MAX_SPLIT_OUTPUTS, (Number(qty.value) || 0) + 1));
+            qty.dispatchEvent(new Event("input"));
+          });
+          stepper.append(minus, qty, plus);
+          row.append(label, stepper);
+          denomList.appendChild(row);
+          qtyInputs.push(qty);
+        }
+        const pegoutHint = document.createElement("p");
+        pegoutHint.className = "hint";
+        pegoutHint.hidden = coin.chain !== "private";
+        pegoutHint.textContent = "5 / 10 / 20 / 50 LTC are recommended for peg-out prep.";
+        denomsPanel.append(denomHead, denomList, pegoutHint);
+
+        let feeInput: HTMLInputElement | null = null;
+        if (coin.chain === "public") {
+          const feeField = document.createElement("label");
+          feeField.className = "field";
+          const feeCaption = document.createElement("span");
+          feeCaption.className = "field-label";
+          feeCaption.textContent = "Fee rate (sat/vB)";
+          feeInput = document.createElement("input");
+          feeInput.type = "number";
+          feeInput.min = "1";
+          feeInput.step = "1";
+          feeInput.value = String(feeRateDefault);
+          feeField.append(feeCaption, feeInput);
+          body.appendChild(feeField);
+        }
+
+        const previewBox = document.createElement("div");
+        previewBox.className = "split-preview";
+        body.append(equalPanel, denomsPanel, previewBox);
+
+        const applyMode = () => {
+          equalBtn.className = prefs.mode === "equal" ? "btn btn-sm btn-primary" : "btn btn-sm";
+          denomsBtn.className = prefs.mode === "denoms" ? "btn btn-sm btn-primary" : "btn btn-sm";
+          equalPanel.hidden = prefs.mode !== "equal";
+          denomsPanel.hidden = prefs.mode !== "denoms";
+        };
+
+        const schedulePreview = () => {
+          if (previewTimer != null) window.clearTimeout(previewTimer);
+          previewTimer = window.setTimeout(() => {
+            void refreshPreview();
+          }, 200);
+        };
+
+        const readQtys = () =>
+          qtyInputs.map((input) => Math.max(0, Math.floor(Number(input.value) || 0)));
+
+        const refreshPreview = async () => {
+          prefs.equalCount = Math.min(
+            MAX_SPLIT_OUTPUTS,
+            Math.max(MIN_EQUAL_SPLIT, Math.floor(Number(equalInput.value) || 2)),
+          );
+          prefs.qtys = readQtys();
+          saveSplitPrefs(prefs);
+          const feeRate = Math.max(1, Math.floor(Number(feeInput?.value) || feeRateDefault));
+          const req =
+            prefs.mode === "equal"
+              ? {
+                  chain: coin.chain,
+                  input: coin.id,
+                  equal_count: prefs.equalCount,
+                  amounts: [] as number[],
+                  fee_rate_sat_vb: coin.chain === "public" ? feeRate : undefined,
+                  fee_sats: 0,
+                }
+              : {
+                  chain: coin.chain,
+                  input: coin.id,
+                  equal_count: null as number | null,
+                  amounts: denomAmountsFromQtys(prefs.qtys),
+                  fee_rate_sat_vb: coin.chain === "public" ? feeRate : undefined,
+                  fee_sats: 0,
+                };
+          previewBox.textContent = "";
+          try {
+            live.preview = await invoke<SplitPreview>("preview_split", { req });
+            live.error = null;
+            const planned = live.preview;
+            const n = planned.outputs.length;
+            if (prefs.mode === "equal") {
+              const each = planned.outputs[0]?.amount_sats ?? 0;
+              equalHint.textContent = `${n} outputs of ~${formatAmountPlain(each)} each (remainder on the last).`;
+            }
+            const list = document.createElement("ul");
+            list.className = "split-denom-list";
+            for (const out of planned.outputs) {
+              const row = document.createElement("li");
+              row.className = "split-denom-row";
+              row.textContent = `${out.is_change ? "Change (back to you)" : "Output"} · ${formatAmountPlain(out.amount_sats)}`;
+              list.appendChild(row);
+            }
+            previewBox.appendChild(list);
+            const feeLine = document.createElement("p");
+            feeLine.className = "hint";
+            feeLine.textContent = `Network fee ${formatAmountPlain(planned.fee_sats)} · ${n} output${n === 1 ? "" : "s"}`;
+            previewBox.appendChild(feeLine);
+            if (n > 20) {
+              appendParagraph(
+                previewBox,
+                `This creates ${n} coins. Many small outputs cost more to spend later.`,
+                "confirm-warning",
+              );
+            }
+            if (planned.outputs.some((o) => o.amount_sats < DUST_LITOSHIS * 2 && !o.is_change)) {
+              appendParagraph(
+                previewBox,
+                "Some outputs are close to the dust floor.",
+                "confirm-warning",
+              );
+            }
+          } catch (e) {
+            live.preview = null;
+            live.error = String(e);
+            const err = document.createElement("p");
+            err.className = "hint split-preview-error";
+            err.textContent = live.error;
+            previewBox.appendChild(err);
+          }
+        };
+
+        equalBtn.addEventListener("click", () => {
+          prefs.mode = "equal";
+          saveSplitPrefs(prefs);
+          applyMode();
+          schedulePreview();
+        });
+        denomsBtn.addEventListener("click", () => {
+          prefs.mode = "denoms";
+          saveSplitPrefs(prefs);
+          applyMode();
+          schedulePreview();
+        });
+        equalInput.addEventListener("input", schedulePreview);
+        feeInput?.addEventListener("input", schedulePreview);
+        for (const qty of qtyInputs) qty.addEventListener("input", schedulePreview);
+        clearBtn.addEventListener("click", () => {
+          for (const qty of qtyInputs) qty.value = "0";
+          schedulePreview();
+        });
+        fillBtn.addEventListener("click", () => {
+          const feeRate = Math.max(1, Math.floor(Number(feeInput?.value) || feeRateDefault));
+          const roughFee =
+            coin.chain === "private"
+              ? 50_000
+              : (11 + 68 + 31 * 8) * feeRate;
+          const filled = greedyFillQtys(Math.max(0, coin.amount_sats - roughFee));
+          for (let i = 0; i < qtyInputs.length; i++) {
+            qtyInputs[i]!.value = String(filled[i] ?? 0);
+          }
+          schedulePreview();
+        });
+        applyMode();
+        void refreshPreview();
+      },
+      actions: [
+        { id: "cancel", label: "Cancel", kind: "ghost" },
+        { id: "review", label: "Review and split", kind: "primary" },
+      ],
+    });
+    if (previewTimer != null) window.clearTimeout(previewTimer);
+    if (result !== "review") return;
+    if (!live.preview) {
+      setStatus(live.error ?? "Adjust the split until the preview succeeds.", "error");
+      continue;
+    }
+    const preview = live.preview;
+    const n = preview.outputs.length;
+    const warnings: string[] = [];
+    if (n > 20) {
+      warnings.push(`This creates ${n} coins. Many small outputs increase future fees and scanning cost.`);
+    }
+    if (isHighFee(preview.fee_sats, preview.input_sats - preview.fee_sats)) {
+      warnings.push("Network fee is at least half of the amount being split.");
+    }
+    const confirmed = await openConfirm({
+      title: "Review split",
+      message: `Split this ${coin.chain === "public" ? "public" : "private"} coin into ${n} outputs back to this wallet.`,
+      destination: truncateId(coin.id),
+      rows: [
+        ["Coin", formatAmountPlain(preview.input_sats)],
+        ...preview.outputs.map((out) => [
+          out.is_change ? "Change" : "Output",
+          formatAmountPlain(out.amount_sats),
+        ] as [string, string]),
+        ["Network fee", formatAmountPlain(preview.fee_sats)],
+      ],
+      warning: warnings,
+      confirmLabel: "Split",
+    });
+    if (!confirmed) continue;
+
+    const feeRate = preview.fee_rate_sat_vb || undefined;
+    showLoading("Broadcasting split…");
+    try {
+      const splitResult = await invoke<SplitResult>("split_coin", {
+        req: {
+          chain: coin.chain,
+          input: coin.id,
+          equal_count: prefs.mode === "equal" ? prefs.equalCount : null,
+          amounts: prefs.mode === "denoms" ? denomAmountsFromQtys(prefs.qtys) : [],
+          fee_rate_sat_vb: coin.chain === "public" ? feeRate : undefined,
+          fee_sats: preview.fee_sats,
+        },
+      });
+      hideLoading();
+      void runSync({ quiet: false });
+      await refreshUtxos();
+      await showResult({
+        title: "Coin split",
+        message: `Created ${splitResult.output_count} outputs in this wallet.`,
+        rows: [
+          ["Network fee", formatAmountPlain(splitResult.fee_sats)],
+          [coin.chain === "public" ? "Transaction ID" : "Kernel ID", splitResult.txid, true],
+        ],
+        copy: {
+          value: splitResult.txid,
+          label: "Copy ID",
+          toast: "ID copied.",
+        },
+        explorerTxid: coin.chain === "public" ? splitResult.txid : undefined,
+      });
+      return;
+    } catch (e) {
+      hideLoading();
+      setStatus(String(e), "error");
+      continue;
+    }
+  }
+}
+
 el.coinControl.addEventListener("toggle", () => {
   if (el.coinControl.open) void refreshUtxos();
 });
 el.peginCoinControl.addEventListener("toggle", () => {
   if (el.peginCoinControl.open) void refreshUtxos();
 });
+el.mwebSendCoinControl.addEventListener("toggle", () => {
+  if (el.mwebSendCoinControl.open) void refreshUtxos();
+});
+el.pegoutCoinControl.addEventListener("toggle", () => {
+  if (el.pegoutCoinControl.open) void refreshUtxos();
+});
 el.btnRefreshUtxos.addEventListener("click", () => void refreshUtxos());
 el.btnRefreshPeginUtxos.addEventListener("click", () => void refreshUtxos());
+el.btnRefreshMwebSendUtxos.addEventListener("click", () => void refreshUtxos());
+el.btnRefreshPegoutUtxos.addEventListener("click", () => void refreshUtxos());
 
 function selectedUtxoSum(selected: Set<string>): number {
   if (selected.size === 0 || utxoCache.length === 0) return 0;
@@ -4806,11 +5583,26 @@ function selectedUtxoSum(selected: Set<string>): number {
 function publicSpendableSats(selected: Set<string> = sendSelectedOutpoints): number {
   const selectedSum = selectedUtxoSum(selected);
   if (selectedSum > 0) return selectedSum;
-  return lastSummary?.confirmed_sats ?? 0;
+  let sum = 0;
+  for (const utxo of utxoCache) {
+    if (!utxo.locked && utxo.confirmations > 0) sum += utxo.amount_sats;
+  }
+  return sum;
 }
 
-function privateSpendableSats(): number {
-  return lastCombined?.mweb_confirmed_sats ?? 0;
+function privateSpendableSats(selected: Set<string> = mwebSendSelectedIds): number {
+  if (selected.size > 0) {
+    let sum = 0;
+    for (const coin of mwebUtxoCache) {
+      if (selected.has(coin.output_id)) sum += coin.amount_sats;
+    }
+    return sum;
+  }
+  let sum = 0;
+  for (const coin of mwebUtxoCache) {
+    if (coin.mature && !coin.locked) sum += coin.amount_sats;
+  }
+  return sum;
 }
 
 function setAmountPresetPressed(group: HTMLElement, preset: AmountPreset | null) {
@@ -4832,7 +5624,10 @@ function clearSendAmountPreset() {
 }
 
 function clearMwebSendAmountPreset() {
-  el.mwebSendDrain.checked = false;
+  if (el.mwebSendDrain.checked) {
+    el.mwebSendDrain.checked = false;
+    renderMwebControlList(mwebSendCoinPanel);
+  }
   setAmountPresetPressed(el.mwebSendAmountPresets, null);
 }
 
@@ -4845,7 +5640,10 @@ function clearPeginAmountPreset() {
 }
 
 function clearPegoutAmountPreset() {
-  el.pegoutDrain.checked = false;
+  if (el.pegoutDrain.checked) {
+    el.pegoutDrain.checked = false;
+    renderMwebControlList(pegoutCoinPanel);
+  }
   setAmountPresetPressed(el.pegoutAmountPresets, null);
 }
 
@@ -4856,8 +5654,16 @@ function applyAmountPreset(opts: {
   drainInput: HTMLInputElement;
   presetGroup: HTMLElement;
   preset: AmountPreset;
+  quiet?: boolean;
 }) {
   if (opts.balance <= 0) {
+    if (opts.quiet) {
+      opts.amountInput.value = "";
+      opts.drainInput.checked = opts.preset === "max";
+      setAmountPresetPressed(opts.presetGroup, opts.preset);
+      updateBusyUi();
+      return;
+    }
     setError(opts.emptyError);
     return;
   }
@@ -4868,6 +5674,13 @@ function applyAmountPreset(opts: {
   } else {
     const amountSats = Math.floor((opts.balance * opts.preset) / 100);
     if (amountSats <= 0) {
+      if (opts.quiet) {
+        opts.amountInput.value = "";
+        opts.drainInput.checked = false;
+        setAmountPresetPressed(opts.presetGroup, opts.preset);
+        updateBusyUi();
+        return;
+      }
       setError("That percentage is too small for the current balance.");
       return;
     }
@@ -4878,7 +5691,7 @@ function applyAmountPreset(opts: {
   updateBusyUi();
 }
 
-function applySendAmountPreset(preset: AmountPreset) {
+function applySendAmountPreset(preset: AmountPreset, quiet = false) {
   applyAmountPreset({
     balance: publicSpendableSats(sendSelectedOutpoints),
     emptyError:
@@ -4889,21 +5702,26 @@ function applySendAmountPreset(preset: AmountPreset) {
     drainInput: el.sendDrain,
     presetGroup: el.sendAmountPresets,
     preset,
+    quiet,
   });
 }
 
-function applyMwebSendAmountPreset(preset: AmountPreset) {
+function applyMwebSendAmountPreset(preset: AmountPreset, quiet = false) {
   applyAmountPreset({
-    balance: privateSpendableSats(),
-    emptyError: "No spendable private balance yet.",
+    balance: privateSpendableSats(mwebSendSelectedIds),
+    emptyError:
+      mwebSendSelectedIds.size > 0
+        ? "Selected coins total zero — pick different coins."
+        : "No spendable private balance yet.",
     amountInput: el.mwebSendAmount,
     drainInput: el.mwebSendDrain,
     presetGroup: el.mwebSendAmountPresets,
     preset,
+    quiet,
   });
 }
 
-function applyPeginAmountPreset(preset: AmountPreset) {
+function applyPeginAmountPreset(preset: AmountPreset, quiet = false) {
   applyAmountPreset({
     balance: publicSpendableSats(peginSelectedOutpoints),
     emptyError:
@@ -4914,18 +5732,53 @@ function applyPeginAmountPreset(preset: AmountPreset) {
     drainInput: el.peginDrain,
     presetGroup: el.peginAmountPresets,
     preset,
+    quiet,
   });
 }
 
-function applyPegoutAmountPreset(preset: AmountPreset) {
+function applyPegoutAmountPreset(preset: AmountPreset, quiet = false) {
+  if (pegoutSelectedIds.size > 0 && preset !== "max") return;
   applyAmountPreset({
-    balance: privateSpendableSats(),
-    emptyError: "No spendable private balance yet.",
+    balance: privateSpendableSats(pegoutSelectedIds),
+    emptyError:
+      pegoutSelectedIds.size > 0
+        ? "Selected coins total zero — pick different coins."
+        : "No spendable private balance yet.",
     amountInput: el.pegoutAmount,
     drainInput: el.pegoutDrain,
     presetGroup: el.pegoutAmountPresets,
     preset,
+    quiet,
   });
+  updateBusyUi();
+}
+
+function reapplyPressedAmountPresets() {
+  const send = pressedAmountPreset(el.sendAmountPresets);
+  if (send != null) applySendAmountPreset(send, true);
+  const mwebSend = pressedAmountPreset(el.mwebSendAmountPresets);
+  if (mwebSend != null) applyMwebSendAmountPreset(mwebSend, true);
+  const pegin = pressedAmountPreset(el.peginAmountPresets);
+  if (pegin != null) applyPeginAmountPreset(pegin, true);
+  const pegout = pressedAmountPreset(el.pegoutAmountPresets);
+  if (pegout != null) applyPegoutAmountPreset(pegout, true);
+}
+
+function pegoutLocksAmount(): boolean {
+  return el.pegoutDrain.checked || pegoutSelectedIds.size > 0;
+}
+
+/** Choosing coins or Max empties those coins one-to-one; the amount field cannot imply consolidation. */
+function syncPegoutSelectionMode() {
+  if (pegoutSelectedIds.size > 0) {
+    applyPegoutAmountPreset("max");
+    return;
+  }
+  if (el.pegoutDrain.checked) {
+    clearPegoutAmountPreset();
+    el.pegoutAmount.value = "";
+  }
+  updateBusyUi();
 }
 
 function bindAmountPresetClicks(
@@ -5356,6 +6209,7 @@ el.btnMwebSend.addEventListener("click", async () => {
     return;
   }
   const drain = el.mwebSendDrain.checked;
+  const selected_output_ids = selectedOutpointsFor(mwebSendCoinPanel);
   let amount_sats = 0;
   if (!drain) {
     const parsed = parseAmountToSats(el.mwebSendAmount.value);
@@ -5373,7 +6227,7 @@ el.btnMwebSend.addEventListener("click", async () => {
   let preview: MwebSendPreview;
   try {
     preview = await invoke<MwebSendPreview>("preview_mweb_send", {
-      req: { address, amount_sats, drain },
+      req: { address, amount_sats, drain, selected_output_ids },
     });
   } catch (e) {
     setError(String(e));
@@ -5398,6 +6252,9 @@ el.btnMwebSend.addEventListener("click", async () => {
       ["Amount", formatAmountPlain(preview.amount_sats)],
       ["Network fee", formatAmountPlain(preview.fee_sats)],
       ["Total leaving private", formatAmountPlain(preview.amount_sats + preview.fee_sats)],
+      ...(selected_output_ids?.length
+        ? ([["Coins", `${selected_output_ids.length} selected`]] as DetailRow[])
+        : []),
     ],
     confirmLabel: drain ? "Send max private" : "Send private",
     afterDetail: (body) => {
@@ -5421,6 +6278,7 @@ el.btnMwebSend.addEventListener("click", async () => {
         address,
         amount_sats: preview.amount_sats,
         fee_sats: preview.fee_sats,
+        selected_output_ids,
       },
     });
   } catch (e) {
@@ -5437,6 +6295,8 @@ el.btnMwebSend.addEventListener("click", async () => {
   el.mwebSendAmount.value = "";
   el.mwebSendNote.value = "";
   clearMwebSendAmountPreset();
+  mwebSendSelectedIds.clear();
+  el.mwebSendCoinControl.open = false;
   await refreshCombined();
   await refreshHistory();
   await showResult({
@@ -5456,8 +6316,10 @@ el.btnMwebSend.addEventListener("click", async () => {
 el.btnPegout.addEventListener("click", async () => {
   if (syncing || sending) return;
   const drain = el.pegoutDrain.checked;
+  const selected_output_ids = selectedOutpointsFor(pegoutCoinPanel);
+  const perCoin = drain || (selected_output_ids?.length ?? 0) > 0;
   let amount_sats = 0;
-  if (!drain) {
+  if (!perCoin) {
     const parsed = parseAmountToSats(el.pegoutAmount.value);
     if (parsed == null) {
       setError(amountError("swap", el.pegoutAmount.value));
@@ -5470,14 +6332,15 @@ el.btnPegout.addEventListener("click", async () => {
   setError(null);
   updateBusyUi();
   showLoading("Preparing swap…");
-  // Funds return to the wallet itself: a fresh transparent address per peg-out
-  // keeps the public history harder to link.
-  let address: string;
+  let address = "";
   let preview: PegoutPreview;
   try {
-    address = await invoke<string>("get_receive_address");
+    if (!perCoin) {
+      // Typed amount: one fresh address. Per-coin path reveals addresses on broadcast.
+      address = await invoke<string>("get_receive_address");
+    }
     preview = await invoke<PegoutPreview>("preview_pegout", {
-      req: { address, amount_sats, drain },
+      req: { address, amount_sats, drain, selected_output_ids },
     });
   } catch (e) {
     setError(String(e));
@@ -5489,22 +6352,43 @@ el.btnPegout.addEventListener("click", async () => {
     hideLoading();
   }
 
+  const outputAmounts =
+    preview.output_amounts?.length ? preview.output_amounts : [preview.amount_sats];
+  const outputCount = preview.output_count || outputAmounts.length;
+  const feeIdx = preview.fee_output_index;
+  const outputRows: DetailRow[] = outputAmounts.map((amt, i) => {
+    const pays = feeIdx != null && feeIdx === i;
+    const label =
+      outputCount === 1 ? "Public coin" : `Public coin ${i + 1}`;
+    return [
+      label,
+      pays ? `${formatAmountPlain(amt)} (pays fee)` : formatAmountPlain(amt),
+    ];
+  });
+
   let readLabel = () => "";
   const confirmed = await openConfirm({
     title: "Move funds to public",
     message:
-      "This returns private funds to a fresh public address of your own, where the amount becomes publicly visible.",
-    destination: address,
+      outputCount > 1
+        ? `This returns private funds to ${outputCount} fresh public addresses of your own, where the amounts become publicly visible.`
+        : "This returns private funds to a fresh public address of your own, where the amount becomes publicly visible.",
+    destination: perCoin ? undefined : address,
     warning: isHighFee(preview.fee_sats, preview.amount_sats)
       ? "Network fee is at least half of the amount you are moving. You can still proceed if this is intentional."
       : undefined,
     rows: [
-      ["Amount", formatAmountPlain(preview.amount_sats)],
+      ...outputRows,
       ["Network fee", formatAmountPlain(preview.fee_sats)],
       ["Total leaving private", formatAmountPlain(preview.amount_sats + preview.fee_sats)],
+      ...(selected_output_ids?.length
+        ? ([["Coins", `${selected_output_ids.length} selected`]] as DetailRow[])
+        : outputCount > 1
+          ? ([["Public addresses", `${outputCount}`]] as DetailRow[])
+          : []),
     ],
     detail: `Destination dust floor is ${preview.dust_sats.toLocaleString("en-US")} litoshis.`,
-    confirmLabel: drain ? "Move max to public" : "Move to public",
+    confirmLabel: "Move to public",
     afterDetail: (body) => {
       readLabel = appendTxLabelField(body, readNoteInput(el.pegoutNote));
     },
@@ -5519,13 +6403,15 @@ el.btnPegout.addEventListener("click", async () => {
 
   updateBusyUi();
   showLoading("Broadcasting swap…");
-  let result: { wtxid: string; fee_sats: number };
+  let result: { wtxid: string; fee_sats: number; addresses?: string[] };
   try {
     result = await invoke("pegout_ltc", {
       req: {
         address,
         amount_sats: preview.amount_sats,
         fee_sats: preview.fee_sats,
+        drain,
+        selected_output_ids,
       },
     });
   } catch (e) {
@@ -5541,15 +6427,29 @@ el.btnPegout.addEventListener("click", async () => {
   el.pegoutAmount.value = "";
   el.pegoutNote.value = "";
   clearPegoutAmountPreset();
+  pegoutSelectedIds.clear();
+  el.pegoutCoinControl.open = false;
+  updateBusyUi();
 
   void runSync({ quiet: false });
+  const resultAddresses =
+    result.addresses?.length ? result.addresses : address ? [address] : [];
+  const addressRows: DetailRow[] = resultAddresses.map((addr, i) => [
+    resultAddresses.length === 1
+      ? "To (your new public address)"
+      : `Address ${i + 1}`,
+    addr,
+    true,
+  ]);
   await showResult({
     title: "Swap to public sent",
     message:
-      "Broadcast to the network. The public funds arrive once the swap confirms. Private transfers are not listed on public explorers — that is expected. Keep the Kernel ID as your reference.",
+      outputCount > 1
+        ? `Broadcast to the network. ${outputCount} public coins arrive once the swap confirms. History shows one peg-out. Keep the Kernel ID as your reference.`
+        : "Broadcast to the network. The public funds arrive once the swap confirms. Private transfers are not listed on public explorers — that is expected. Keep the Kernel ID as your reference.",
     rows: [
-      ["To (your new public address)", address, true],
-      ["Amount", formatAmountPlain(preview.amount_sats)],
+      ...addressRows,
+      ...outputRows,
       ["Network fee", formatAmountPlain(result.fee_sats)],
       ["Kernel ID", result.wtxid, true],
     ],

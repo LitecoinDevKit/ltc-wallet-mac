@@ -640,6 +640,20 @@
                         <button type="button" class="fee-chip amount-preset" data-pct="max">Max</button>
                       </div>
                       <input id="mweb-send-drain" type="checkbox" hidden />
+                      <details class="coin-control" id="mweb-send-coin-control">
+                        <summary>Choose coins (advanced)</summary>
+                        <p class="hint">
+                          Optional. Pick which private coins to spend. Percentage chips then apply to
+                          the selected total; Max empties those coins (minus the private fee). Frozen
+                          coins are skipped by automatic selection.
+                        </p>
+                        <p class="hint mono" id="mweb-send-coin-control-sum" hidden></p>
+                        <ul id="mweb-send-utxo-list" class="utxo-list"></ul>
+                        <p class="hint" id="mweb-send-utxo-empty" hidden>No private coins yet.</p>
+                        <button type="button" id="btn-refresh-mweb-send-utxos" class="btn btn-ghost btn-sm">
+                          Refresh coins
+                        </button>
+                      </details>
                       <label class="field">
                         <span class="field-label">Note (optional)</span>
                         <input
@@ -858,8 +872,10 @@
                   <div id="swap-out" class="seg-panel" role="tabpanel" aria-labelledby="swap-seg-out" hidden>
                     <div class="send-form">
                       <p class="lede">
-                        Return private funds to your public balance. They arrive on a fresh
-                        <code>ltc1</code> address of your own, generated automatically.
+                        Return private funds to your public balance. A typed amount arrives on one
+                        fresh <code>ltc1</code> address. Max or chosen coins arrive on one
+                        <code>ltc1</code> each, so a private split is not consolidated on the way
+                        out.
                       </p>
                       <label class="field">
                         <span class="field-label" id="pegout-amount-label">Amount (LTC)</span>
@@ -877,6 +893,20 @@
                         <button type="button" class="fee-chip amount-preset" data-pct="max">Max</button>
                       </div>
                       <input id="pegout-drain" type="checkbox" hidden />
+                      <details class="coin-control" id="pegout-coin-control">
+                        <summary>Choose coins (advanced)</summary>
+                        <p class="hint">
+                          Optional. Each selected coin goes to its own fresh public address (the
+                          private fee comes out of the largest). Frozen coins are skipped by
+                          automatic selection.
+                        </p>
+                        <p class="hint mono" id="pegout-coin-control-sum" hidden></p>
+                        <ul id="pegout-utxo-list" class="utxo-list"></ul>
+                        <p class="hint" id="pegout-utxo-empty" hidden>No private coins yet.</p>
+                        <button type="button" id="btn-refresh-pegout-utxos" class="btn btn-ghost btn-sm">
+                          Refresh coins
+                        </button>
+                      </details>
                       <label class="field">
                         <span class="field-label">Note (optional)</span>
                         <input
@@ -962,12 +992,43 @@
                 <button type="button" id="btn-refresh-coins" class="btn btn-ghost btn-sm">Refresh</button>
               </div>
               <p class="hint">
-                Freeze coins so automatic sends skip them. Labels stay on this computer and are
-                included in metadata export.
+                Freeze public coins so automatic sends skip them. Split a coin into equal pieces or
+                common denominations — an advanced self-transfer, not a payment.
               </p>
-              <p class="hint mono" id="coins-sum" hidden></p>
-              <ul class="utxo-list" id="coins-utxo-list"></ul>
-              <p class="hint" id="coins-utxo-empty">No transparent coins yet.</p>
+              <div class="seg-toggle" id="coins-toggle" role="tablist" aria-label="Coin type">
+                <button
+                  type="button"
+                  id="coins-seg-public"
+                  class="seg"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="coins-public"
+                >
+                  <span class="seg-label">Public</span>
+                  <span class="seg-balance" id="coins-balance-public">—</span>
+                </button>
+                <button
+                  type="button"
+                  id="coins-seg-private"
+                  class="seg"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="coins-private"
+                >
+                  <span class="seg-label">Private <span class="badge badge-accent">MWEB</span></span>
+                  <span class="seg-balance" id="coins-balance-private">—</span>
+                </button>
+              </div>
+              <div id="coins-public" class="seg-panel" role="tabpanel" aria-labelledby="coins-seg-public">
+                <p class="hint mono" id="coins-sum" hidden></p>
+                <ul class="utxo-list coins-utxo-list" id="coins-utxo-list"></ul>
+                <p class="hint" id="coins-utxo-empty">No public coins yet.</p>
+              </div>
+              <div id="coins-private" class="seg-panel" role="tabpanel" aria-labelledby="coins-seg-private" hidden>
+                <p class="hint mono" id="coins-mweb-sum" hidden></p>
+                <ul class="utxo-list coins-utxo-list" id="coins-mweb-list"></ul>
+                <p class="hint" id="coins-mweb-empty">No private coins yet.</p>
+              </div>
             </div>
           </section>
 

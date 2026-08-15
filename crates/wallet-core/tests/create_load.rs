@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use wallet_core::{
     CreateWalletRequest, MemoryBackedApp, MemoryStore, RestoreWalletRequest, SecretStore,
-    SendRequest, SetTxLabelRequest, SetUtxoLockedRequest, WalletError, WalletNetwork,
+    SendRequest, SetTxLabelRequest, SetUtxoLockedRequest, SplitChain, SplitRequest, WalletError,
+    WalletNetwork,
 };
 
 fn with_secrets(secrets: Arc<dyn SecretStore>) -> MemoryBackedApp {
@@ -289,6 +290,37 @@ fn tx_labels_round_trip_and_wipe() {
 }
 
 #[test]
+fn mweb_frozen_and_label_wipe() {
+    use wallet_core::{SetMwebUtxoLockedRequest, SetUtxoLabelRequest};
+    let dir = tempdir().unwrap();
+    let app = with_secrets(Arc::new(MemoryStore::new()));
+    app.create(
+        dir.path(),
+        CreateWalletRequest {
+            network: WalletNetwork::Testnet,
+            electrum_url: None,
+        },
+    )
+    .unwrap();
+    let id = "ab".repeat(32);
+    app.set_mweb_utxo_locked(SetMwebUtxoLockedRequest {
+        output_id: id.clone(),
+        locked: true,
+    })
+    .unwrap();
+    app.set_utxo_label(SetUtxoLabelRequest {
+        outpoint: id,
+        label: "savings".into(),
+    })
+    .unwrap();
+    assert!(dir.path().join("mweb_frozen.json").is_file());
+    assert!(dir.path().join("utxo_labels.json").is_file());
+    app.wipe(dir.path()).unwrap();
+    assert!(!dir.path().join("mweb_frozen.json").is_file());
+    assert!(!dir.path().join("utxo_labels.json").is_file());
+}
+
+#[test]
 fn contacts_round_trip_and_wipe() {
     use wallet_core::{ContactKind, DeleteContactRequest, UpsertContactRequest};
 
@@ -532,6 +564,146 @@ fn coin_control_list_lock_and_manual_select() {
         matches!(broadcast_err, WalletError::Electrum(_)),
         "expected build success then electrum stub, got {broadcast_err}"
     );
+}
+
+fn fund_confirmed_utxo(app: &MemoryBackedApp, amount_sats: u64) -> String {
+    use bdk_wallet::bitcoin::hashes::Hash;
+    use bdk_wallet::bitcoin::{Amount, BlockHash};
+    use bdk_wallet::chain::BlockId;
+    use bdk_wallet::test_utils::{insert_checkpoint, receive_output_in_latest_block};
+
+    app.with_wallet_mut(|wallet, db| {
+        insert_checkpoint(
+            wallet,
+            BlockId {
+                height: 1,
+                hash: BlockHash::all_zeros(),
+            },
+        );
+        let op = receive_output_in_latest_block(wallet, Amount::from_sat(amount_sats));
+        wallet
+            .persist(db)
+            .map_err(|e| WalletError::Persist(e.to_string()))?;
+        Ok(op.to_string())
+    })
+    .unwrap()
+}
+
+#[test]
+fn public_equal_split_is_one_input() {
+    let dir = tempdir().unwrap();
+    let app = with_secrets(Arc::new(MemoryStore::new()));
+    app.create(
+        dir.path(),
+        CreateWalletRequest {
+            network: WalletNetwork::Testnet,
+            electrum_url: None,
+        },
+    )
+    .unwrap();
+    let outpoint = fund_confirmed_utxo(&app, 1_000_000);
+    let req = SplitRequest {
+        chain: SplitChain::Public,
+        input: outpoint,
+        equal_count: Some(3),
+        amounts: vec![],
+        fee_rate_sat_vb: Some(1),
+        fee_sats: 0,
+    };
+    let preview = app.preview_split(req.clone()).unwrap();
+    assert_eq!(preview.outputs.len(), 3);
+    assert!(!preview.creates_change);
+    let sum: u64 = preview.outputs.iter().map(|o| o.amount_sats).sum();
+    assert_eq!(sum + preview.fee_sats, 1_000_000);
+
+    let (n_in, n_out, fee) = app.public_split_io_count(req).unwrap();
+    assert_eq!(n_in, 1, "split must spend exactly one coin");
+    assert_eq!(n_out, 3);
+    assert_eq!(fee, preview.fee_sats);
+}
+
+#[test]
+fn public_split_refuses_second_wallet_coin() {
+    let dir = tempdir().unwrap();
+    let app = with_secrets(Arc::new(MemoryStore::new()));
+    app.create(
+        dir.path(),
+        CreateWalletRequest {
+            network: WalletNetwork::Testnet,
+            electrum_url: None,
+        },
+    )
+    .unwrap();
+    let first = fund_confirmed_utxo(&app, 1_000_000);
+    let _second = fund_confirmed_utxo(&app, 800_000);
+    assert_eq!(app.list_unspent().unwrap().len(), 2);
+    let (n_in, _, _) = app
+        .public_split_io_count(SplitRequest {
+            chain: SplitChain::Public,
+            input: first,
+            equal_count: Some(2),
+            amounts: vec![],
+            fee_rate_sat_vb: Some(1),
+            fee_sats: 0,
+        })
+        .unwrap();
+    assert_eq!(n_in, 1);
+}
+
+#[test]
+fn public_denom_split_change_and_frozen() {
+    let dir = tempdir().unwrap();
+    let app = with_secrets(Arc::new(MemoryStore::new()));
+    app.create(
+        dir.path(),
+        CreateWalletRequest {
+            network: WalletNetwork::Testnet,
+            electrum_url: None,
+        },
+    )
+    .unwrap();
+    let outpoint = fund_confirmed_utxo(&app, 1_000_000);
+    let preview = app
+        .preview_split(SplitRequest {
+            chain: SplitChain::Public,
+            input: outpoint.clone(),
+            equal_count: None,
+            amounts: vec![100_000, 100_000],
+            fee_rate_sat_vb: Some(1),
+            fee_sats: 0,
+        })
+        .unwrap();
+    assert!(preview.creates_change);
+    assert!(preview.change_sats >= 2940);
+    let (n_in, n_out, _) = app
+        .public_split_io_count(SplitRequest {
+            chain: SplitChain::Public,
+            input: outpoint.clone(),
+            equal_count: None,
+            amounts: vec![100_000, 100_000],
+            fee_rate_sat_vb: Some(1),
+            fee_sats: preview.fee_sats,
+        })
+        .unwrap();
+    assert_eq!(n_in, 1);
+    assert_eq!(n_out, 3); // two denoms + change
+
+    app.set_utxo_locked(SetUtxoLockedRequest {
+        outpoint: outpoint.clone(),
+        locked: true,
+    })
+    .unwrap();
+    let err = app
+        .preview_split(SplitRequest {
+            chain: SplitChain::Public,
+            input: outpoint,
+            equal_count: Some(2),
+            amounts: vec![],
+            fee_rate_sat_vb: Some(1),
+            fee_sats: 0,
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("frozen"), "got {err}");
 }
 
 #[test]
