@@ -1,3 +1,6 @@
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -84,8 +87,19 @@ enum Command {
         #[arg(long)]
         aezeed_passphrase: Option<String>,
     },
-    /// Print wallet summary JSON.
+    /// Print wallet summary JSON (transparent only).
     Summary,
+    /// Print combined transparent + MWEB summary JSON (no secrets).
+    CombinedSummary,
+    /// List unspent MWEB coins (amounts, maturity, lock; no secrets).
+    MwebUnspent,
+    /// Lab-only: write scan/spend hex + ltcmweb1 dest to a chmod 600 env file.
+    /// Does not print secrets. For coinswapd Proof A, not a CoinSwap UI.
+    MwebCoinswapdEnv {
+        /// Output path (created or overwritten, mode 0600).
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Reveal and print a new receive address.
     Address,
     /// Sync against Electrum (full_scan first, then incremental).
@@ -189,6 +203,28 @@ fn main() -> Result<()> {
             let summary = app.summary().context("summary")?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
+        Command::CombinedSummary => {
+            ensure_loaded(&app, &data_dir, &passphrase_opt)?;
+            let summary = app.combined_summary().context("combined-summary")?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+        Command::MwebUnspent => {
+            ensure_loaded(&app, &data_dir, &passphrase_opt)?;
+            let coins = app.list_mweb_unspent().context("mweb-unspent")?;
+            println!("{}", serde_json::to_string_pretty(&coins)?);
+        }
+        Command::MwebCoinswapdEnv { out } => {
+            ensure_loaded(&app, &data_dir, &passphrase_opt)?;
+            let (scan, spend, dest) = app
+                .export_mweb_coinswapd_secrets()
+                .context("export mweb coinswapd secrets")?;
+            write_coinswapd_env(&out, &scan, &spend, &dest)?;
+            let dest_ok = dest.starts_with("ltcmweb1");
+            eprintln!(
+                "wrote {} (scan/spend omitted); dest_hrp_ok={dest_ok}",
+                out.display()
+            );
+        }
         Command::Address => {
             ensure_loaded(&app, &data_dir, &passphrase_opt)?;
             let address = app.receive_address().context("receive address")?;
@@ -256,6 +292,51 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn write_coinswapd_env(path: &Path, scan: &str, spend: &str, dest: &str) -> Result<()> {
+    if scan.len() != 64 || spend.len() != 64 {
+        bail!("scan/spend must be 32-byte hex");
+    }
+    if !dest.starts_with("ltcmweb1") {
+        bail!("MWEB dest must be ltcmweb1…");
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    if path.exists() {
+        let existing = std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+        for line in existing.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("MWEB_SCAN_SECRET=")
+                || trimmed.starts_with("MWEB_SPEND_SECRET=")
+                || trimmed.starts_with("E2E_MWEB_DEST=")
+            {
+                continue;
+            }
+            lines.push(line.to_string());
+        }
+        if !lines.is_empty() && !lines.last().map(|s| s.is_empty()).unwrap_or(true) {
+            lines.push(String::new());
+        }
+    }
+    lines.push(format!("MWEB_SCAN_SECRET={scan}"));
+    lines.push(format!("MWEB_SPEND_SECRET={spend}"));
+    lines.push(format!("E2E_MWEB_DEST={dest}"));
+    lines.push(String::new());
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true).mode(0o600);
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    write!(f, "{}", lines.join("\n")).context("write coinswapd env")?;
+    f.sync_all().context("sync coinswapd env")?;
+    Ok(())
+}
+
 fn ensure_loaded(
     app: &WalletApp,
     data_dir: &Path,
@@ -275,4 +356,51 @@ fn ensure_loaded(
     }
     app.load(data_dir).context("load wallet")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn write_coinswapd_env_merges_without_clobbering_other_keys() {
+        let path = std::env::temp_dir().join(format!(
+            "mln-coinswapd-env-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, "WALLET_PASSPHRASE=keep-me\nMIX_K0=aa\n").unwrap();
+        let scan = "11".repeat(32);
+        let spend = "22".repeat(32);
+        write_coinswapd_env(&path, &scan, &spend, "ltcmweb1qqtestaddress").unwrap();
+        let got = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(got.contains("WALLET_PASSPHRASE=keep-me"));
+        assert!(got.contains("MIX_K0=aa"));
+        assert!(got.contains(&format!("MWEB_SCAN_SECRET={scan}")));
+        assert!(got.contains("E2E_MWEB_DEST=ltcmweb1qqtestaddress"));
+    }
+
+    #[test]
+    fn write_coinswapd_env_mode_is_600() {
+        let path = std::env::temp_dir().join(format!(
+            "mln-coinswapd-env-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let scan = "11".repeat(32);
+        let spend = "22".repeat(32);
+        write_coinswapd_env(&path, &scan, &spend, "ltcmweb1qqtestaddress").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        let _ = fs::remove_file(&path);
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }

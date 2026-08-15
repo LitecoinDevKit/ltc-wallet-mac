@@ -46,6 +46,8 @@ fn kind_slug(kind: TxKind) -> &'static str {
         TxKind::Pegout => "pegout",
         TxKind::MwebSend => "mweb-send",
         TxKind::MwebReceive => "mweb-receive",
+        TxKind::Split => "split",
+        TxKind::MwebSplit => "mweb-split",
     }
 }
 

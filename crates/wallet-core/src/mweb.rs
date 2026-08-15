@@ -1,5 +1,6 @@
 //! MWEB orchestration beside the transparent wallet.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::net::ToSocketAddrs;
 use std::path::Path;
@@ -21,20 +22,24 @@ use bdk_mweb::MwebCoinDatabase;
 use bdk_mweb::{AddressBook, BanReason, ChangeSet, SealContext, MWEB_PEGIN_MATURITY};
 use bdk_wallet::bitcoin::consensus::encode::serialize_hex;
 use bdk_wallet::bitcoin::key::Secp256k1;
-use bdk_wallet::bitcoin::{Address, Amount, NetworkKind};
+use bdk_wallet::bitcoin::{Address, Amount, FeeRate, NetworkKind, ScriptBuf};
 use bdk_wallet::chain::Merge;
 use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::{extract_prepared_mweb_pegin, MwebStore, PersistedWallet, SignOptions};
+use bdk_wallet::{
+    extract_prepared_mweb_pegin, select_mweb_coins, MwebStore, PersistedWallet, SignOptions,
+};
 
 use crate::dto::{
-    CombinedSummary, MwebBroadcastResult, MwebSendRequest, PeginRequest, PeginResult,
-    PegoutRequest, TxKind, WalletSummary,
+    CombinedSummary, MwebBroadcastResult, MwebSendRequest, MwebUtxoRecord, PeginRequest,
+    PeginResult, PegoutRequest, SplitResult, TxKind, WalletSummary,
 };
 use crate::error::WalletError;
 use crate::meta;
+use crate::mweb_frozen;
 use crate::mweb_history::{now_ts, MwebHistory, MwebHistoryEntry};
 use crate::network::WalletNetwork;
 use crate::rpc;
+use crate::utxo_labels;
 
 /// MWEB address-book size. Ownership lookup during scanning is a single map
 /// probe regardless of book size (see `bdk_mweb::scan`), so this is sized for
@@ -42,14 +47,137 @@ use crate::rpc;
 /// old `DEFAULT_GAP_LIMIT` of 20 silently missed coins at higher indices.
 pub const MWEB_GAP_LIMIT: u32 = 1000;
 
-/// Sum of mature, spendable MWEB coin amounts at `tip_height`.
-pub fn spendable_mweb_sats(runtime: &MwebRuntime, tip_height: u32) -> u64 {
-    runtime
-        .store
-        .db()
-        .unspent_spendable(tip_height, MWEB_PEGIN_MATURITY)
+/// Mature, unfrozen MWEB coins at `tip_height`.
+pub fn spendable_pool(
+    db: &MwebCoinDatabase,
+    tip_height: u32,
+    frozen: &BTreeSet<String>,
+) -> Vec<bdk_mweb::MwebCoin> {
+    db.unspent_spendable(tip_height, MWEB_PEGIN_MATURITY)
+        .into_iter()
+        .filter(|c| !frozen.contains(&hex::encode(c.output_id)))
+        .collect()
+}
+
+/// Sum of mature, unfrozen MWEB coin amounts at `tip_height`.
+pub fn spendable_mweb_sats(
+    runtime: &MwebRuntime,
+    tip_height: u32,
+    frozen: &BTreeSet<String>,
+) -> u64 {
+    spendable_pool(runtime.store.db(), tip_height, frozen)
         .iter()
         .fold(0u64, |acc, c| acc.saturating_add(c.amount))
+}
+
+pub fn normalize_selected_ids(ids: Option<&[String]>) -> Option<Vec<String>> {
+    let v: Vec<String> = ids
+        .unwrap_or(&[])
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// Resolve coins for a private send or peg-out.
+///
+/// Manual selection spends **exactly** the listed coins (all of them). Automatic
+/// selection greeds over the unfrozen mature pool.
+pub fn resolve_spend_coins(
+    db: &MwebCoinDatabase,
+    tip_height: u32,
+    frozen: &BTreeSet<String>,
+    selected_ids: Option<&[String]>,
+    needed: u64,
+    action: &str,
+) -> Result<Vec<bdk_mweb::MwebCoin>, WalletError> {
+    if let Some(ids) = selected_ids.filter(|v| !v.is_empty()) {
+        let mut coins = Vec::with_capacity(ids.len());
+        for id in ids {
+            coins.push(select_mweb_coin(db, id, tip_height, frozen, action)?);
+        }
+        let sum: u64 = coins.iter().map(|c| c.amount).sum();
+        if sum < needed {
+            return Err(WalletError::BuildTx(format!(
+                "need {needed} litoshis from the selected private coins but they only total {sum}"
+            )));
+        }
+        Ok(coins)
+    } else {
+        let pool = spendable_pool(db, tip_height, frozen);
+        select_mweb_coins(&pool, needed).map_err(|e| WalletError::Mweb(e.to_string()))
+    }
+}
+
+/// Planned HogEx amounts for a per-coin peg-out (one public output per private coin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PegoutPerCoinPlan {
+    pub amounts: Vec<u64>,
+    /// Index of the output that absorbed the kernel fee.
+    pub fee_output_index: usize,
+}
+
+/// P2WPKH dust at the same 30 sat/vB relay rate used for typed peg-outs.
+pub fn p2wpkh_dust_sats() -> Result<u64, WalletError> {
+    let dust_relay = FeeRate::from_sat_per_vb(30)
+        .ok_or_else(|| WalletError::BuildTx("internal dust fee rate".into()))?;
+    let mut bytes = vec![0x00, 0x14];
+    bytes.extend_from_slice(&[0u8; 20]);
+    Ok(ScriptBuf::from_bytes(bytes)
+        .minimal_non_dust_custom(dust_relay)
+        .to_sat())
+}
+
+/// Map each spent private coin to a public HogEx amount.
+///
+/// The kernel fee is taken from the largest coin so other denominations stay exact.
+/// `N = 1` is the same as today's single-output drain of that coin.
+pub fn plan_pegout_per_coin(
+    coin_amounts: &[u64],
+    fee_sats: u64,
+    dust_sats: u64,
+) -> Result<PegoutPerCoinPlan, WalletError> {
+    if coin_amounts.is_empty() {
+        return Err(WalletError::BuildTx(
+            "no spendable private coins to peg out".into(),
+        ));
+    }
+    let fee_output_index = coin_amounts
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, amt)| (*amt, *i))
+        .map(|(i, _)| i)
+        .expect("non-empty");
+    let mut amounts = coin_amounts.to_vec();
+    let largest = amounts[fee_output_index];
+    let after_fee = largest.checked_sub(fee_sats).ok_or_else(|| {
+        WalletError::BuildTx(
+            "After paying the fee, the largest coin would be below the dust limit".into(),
+        )
+    })?;
+    if after_fee < dust_sats {
+        return Err(WalletError::BuildTx(
+            "After paying the fee, the largest coin would be below the dust limit".into(),
+        ));
+    }
+    amounts[fee_output_index] = after_fee;
+    for (i, amt) in amounts.iter().enumerate() {
+        if *amt < dust_sats {
+            return Err(WalletError::BuildTx(format!(
+                "public output {} of {amt} litoshis is below the {dust_sats} litoshis dust limit",
+                i + 1
+            )));
+        }
+    }
+    Ok(PegoutPerCoinPlan {
+        amounts,
+        fee_output_index,
+    })
 }
 
 pub struct MwebRuntime {
@@ -513,7 +641,10 @@ pub(crate) fn update_outgoing_confirmations(
 ) {
     for entry in &mut history.entries {
         if entry.confirmed_height.is_some()
-            || !matches!(entry.kind, TxKind::Pegout | TxKind::MwebSend)
+            || !matches!(
+                entry.kind,
+                TxKind::Pegout | TxKind::MwebSend | TxKind::MwebSplit
+            )
         {
             continue;
         }
@@ -757,6 +888,240 @@ mod tests {
             &[0],
         );
         assert_eq!(got, vec![None, None]);
+    }
+
+    #[test]
+    fn select_split_coin_picks_known_id_not_another() {
+        let mut db = MwebCoinDatabase::default();
+        let mut a = coin(1, Some(100), Some(1));
+        a.amount = 30_000_000;
+        let mut b = coin(2, Some(100), Some(2));
+        b.amount = 50_000_000;
+        db.insert(a);
+        db.insert(b);
+        let got = select_split_coin(&db, &id_hex(2), TIP, &BTreeSet::new()).unwrap();
+        assert_eq!(got.output_id, [2; 32]);
+        assert_eq!(got.amount, 50_000_000);
+        let err = select_split_coin(&db, &id_hex(9), TIP, &BTreeSet::new()).unwrap_err();
+        assert!(err.to_string().contains("not an unspent"));
+    }
+
+    #[test]
+    fn select_split_coin_refuses_immature_pegin() {
+        let mut db = MwebCoinDatabase::default();
+        let mut c = coin(3, Some(TIP), Some(1));
+        c.is_pegin = true;
+        db.insert(c);
+        let err = select_split_coin(&db, &id_hex(3), TIP, &BTreeSet::new()).unwrap_err();
+        assert!(err.to_string().contains("not yet spendable"));
+    }
+
+    #[test]
+    fn select_split_coin_refuses_frozen() {
+        let mut db = MwebCoinDatabase::default();
+        db.insert(coin(4, Some(100), Some(1)));
+        let mut frozen = BTreeSet::new();
+        frozen.insert(id_hex(4));
+        let err = select_split_coin(&db, &id_hex(4), TIP, &frozen).unwrap_err();
+        assert!(err.to_string().contains("frozen"));
+        assert!(err.to_string().contains("splitting"));
+    }
+
+    #[test]
+    fn spendable_pool_skips_frozen() {
+        let mut db = MwebCoinDatabase::default();
+        let mut small = coin(1, Some(100), Some(1));
+        small.amount = 1_000_000;
+        let mut big = coin(2, Some(100), Some(2));
+        big.amount = 50_000_000;
+        db.insert(small);
+        db.insert(big);
+        let mut frozen = BTreeSet::new();
+        frozen.insert(id_hex(2));
+        let pool = spendable_pool(&db, TIP, &frozen);
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].output_id, [1; 32]);
+        let needed = 900_000;
+        let selected = resolve_spend_coins(&db, TIP, &frozen, None, needed, "spending").unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].output_id, [1; 32]);
+    }
+
+    #[test]
+    fn resolve_spend_coins_uses_exact_ids() {
+        let mut db = MwebCoinDatabase::default();
+        let mut a = coin(1, Some(100), Some(1));
+        a.amount = 10_000_000;
+        let mut b = coin(2, Some(100), Some(2));
+        b.amount = 50_000_000;
+        db.insert(a);
+        db.insert(b);
+        let ids = vec![id_hex(1)];
+        let selected = resolve_spend_coins(
+            &db,
+            TIP,
+            &BTreeSet::new(),
+            Some(&ids),
+            1_000_000,
+            "spending",
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].output_id, [1; 32]);
+        let frozen = BTreeSet::from([id_hex(1)]);
+        let err = resolve_spend_coins(&db, TIP, &frozen, Some(&ids), 1_000_000, "spending")
+            .unwrap_err();
+        assert!(err.to_string().contains("frozen"));
+        let mut immature = coin(3, Some(TIP), Some(1));
+        immature.is_pegin = true;
+        db.insert(immature);
+        let immature_ids = vec![id_hex(3)];
+        let err = resolve_spend_coins(
+            &db,
+            TIP,
+            &BTreeSet::new(),
+            Some(&immature_ids),
+            1_000_000,
+            "spending",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not yet spendable"));
+    }
+
+    #[test]
+    fn plan_pegout_per_coin_takes_fee_from_largest() {
+        let plan = plan_pegout_per_coin(
+            &[5_000_000, 10_000_000, 20_000_000],
+            50_000,
+            2_940,
+        )
+        .unwrap();
+        assert_eq!(plan.fee_output_index, 2);
+        assert_eq!(plan.amounts, vec![5_000_000, 10_000_000, 19_950_000]);
+        assert_eq!(plan.amounts.iter().sum::<u64>(), 34_950_000);
+    }
+
+    #[test]
+    fn plan_pegout_per_coin_single_matches_drain() {
+        let plan = plan_pegout_per_coin(&[10_000_000], 50_000, 2_940).unwrap();
+        assert_eq!(plan.fee_output_index, 0);
+        assert_eq!(plan.amounts, vec![9_950_000]);
+    }
+
+    #[test]
+    fn plan_pegout_per_coin_refuses_dust_after_fee() {
+        let err = plan_pegout_per_coin(&[51_000], 50_000, 2_940).unwrap_err();
+        assert!(err.to_string().contains("below the dust limit"));
+        let err = plan_pegout_per_coin(&[], 50_000, 2_940).unwrap_err();
+        assert!(err.to_string().contains("no spendable private coins"));
+    }
+
+    #[test]
+    fn plan_pegout_per_coin_two_selected_skips_frozen_pool() {
+        let mut db = MwebCoinDatabase::default();
+        let mut small = coin(1, Some(100), Some(1));
+        small.amount = 5_000_000;
+        let mut mid = coin(2, Some(100), Some(2));
+        mid.amount = 10_000_000;
+        let mut frozen_coin = coin(3, Some(100), Some(3));
+        frozen_coin.amount = 50_000_000;
+        db.insert(small);
+        db.insert(mid);
+        db.insert(frozen_coin);
+        let frozen = BTreeSet::from([id_hex(3)]);
+        let pool = spendable_pool(&db, TIP, &frozen);
+        let amounts: Vec<u64> = pool.iter().map(|c| c.amount).collect();
+        assert_eq!(amounts.len(), 2);
+        let plan = plan_pegout_per_coin(&amounts, 50_000, 2_940).unwrap();
+        assert_eq!(plan.amounts.len(), 2);
+        assert_eq!(plan.amounts[plan.fee_output_index], 9_950_000);
+        assert!(plan.amounts.contains(&5_000_000));
+    }
+
+    #[test]
+    fn list_mweb_unspent_shows_locked_and_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = crate::seed::MasterSecret::parse(
+            &crate::descriptors::generate_mnemonic().unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut runtime = MwebRuntime::open(
+            dir.path(),
+            &secret,
+            WalletNetwork::Testnet,
+            crate::dto::MwebScheme::default().to_master_scheme(),
+            None,
+        )
+        .unwrap();
+        runtime.store.db_mut().insert(coin(5, Some(100), Some(1)));
+        let id = id_hex(5);
+        mweb_frozen::set_locked(dir.path(), &id, true).unwrap();
+        crate::utxo_labels::set_label(dir.path(), &id, "savings").unwrap();
+        let rows = list_mweb_unspent(&runtime, TIP, dir.path());
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].locked);
+        assert_eq!(rows[0].label, "savings");
+    }
+
+    #[test]
+    fn fund_mweb_split_spends_only_the_selected_coin() {
+        use crate::descriptors;
+        use crate::dto::MwebScheme;
+        use crate::seed::MasterSecret;
+        let dir = tempfile::tempdir().unwrap();
+        let secret =
+            MasterSecret::parse(&descriptors::generate_mnemonic().unwrap(), None).unwrap();
+        let runtime = MwebRuntime::open(
+            dir.path(),
+            &secret,
+            WalletNetwork::Testnet,
+            MwebScheme::default().to_master_scheme(),
+            None,
+        )
+        .unwrap();
+        let mut big = coin(2, Some(100), Some(2));
+        big.amount = 50_000_000;
+        let mut db = MwebCoinDatabase::default();
+        db.insert(coin(1, Some(100), Some(1)));
+        db.insert(big.clone());
+        let selected = select_split_coin(&db, &id_hex(2), TIP, &BTreeSet::new()).unwrap();
+        assert_eq!(selected.output_id, [2; 32]);
+        let kind = NetworkKind::Test;
+        let addr0 = runtime
+            .keys
+            .address(0, kind, &runtime.secp)
+            .unwrap();
+        let addr1 = runtime
+            .keys
+            .address(1, kind, &runtime.secp)
+            .unwrap();
+        // Dummy coin secrets will not produce a valid spend, but funding must
+        // still take exactly the selected input rather than the whole pool.
+        let funded = bdk_mweb::fund_mweb_spend(
+            vec![selected],
+            vec![(addr0, 10_000_000), (addr1, 10_000_000)],
+            vec![],
+            50_000,
+            &runtime.keys,
+            CHANGE_ADDRESS_INDEX,
+            kind,
+            &runtime.secp,
+        );
+        match funded {
+            Ok(funded) => {
+                assert_eq!(funded.spent_coins.len(), 1);
+                assert_eq!(funded.spent_coins[0].output_id, [2; 32]);
+            }
+            Err(e) => {
+                // Funding may reject stub coin secrets; selection still pinned one coin.
+                let msg = e.to_string();
+                assert!(
+                    !msg.to_lowercase().contains("insufficient"),
+                    "should not pull a second coin from the pool: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1466,6 +1831,7 @@ fn broadcast_via_p2p(
 pub fn mweb_send(
     wallet: &PersistedWallet<Connection>,
     runtime: &mut MwebRuntime,
+    data_dir: &Path,
     rpc_url: Option<&str>,
     peers: &[String],
     req: MwebSendRequest,
@@ -1476,19 +1842,33 @@ pub fn mweb_send(
         .map_err(|e| WalletError::InvalidAddress(e.to_string()))?
         .require_network(net)
         .map_err(|e| WalletError::InvalidAddress(e.to_string()))?;
-    let mut funded = wallet
-        .fund_mweb_send(
-            runtime.store.db(),
-            &runtime.keys,
-            dest,
-            bdk_wallet::MwebSpendParams::new(
-                Amount::from_sat(req.amount_sats),
-                Amount::from_sat(req.fee_sats),
-                CHANGE_ADDRESS_INDEX,
-            ),
-            &runtime.secp,
-        )
-        .map_err(|e| WalletError::Mweb(e.to_string()))?;
+    let tip = wallet.latest_checkpoint().height();
+    let frozen = mweb_frozen::read_ids(data_dir)?.ids;
+    let selected = normalize_selected_ids(req.selected_output_ids.as_deref());
+    let needed = req.amount_sats.saturating_add(req.fee_sats);
+    let coins = resolve_spend_coins(
+        runtime.store.db(),
+        tip,
+        &frozen,
+        selected.as_deref(),
+        needed,
+        "spending",
+    )?;
+    let kind = match network {
+        WalletNetwork::Mainnet => NetworkKind::Main,
+        WalletNetwork::Testnet => NetworkKind::Test,
+    };
+    let mut funded = bdk_mweb::fund_mweb_spend(
+        coins,
+        vec![(dest, req.amount_sats)],
+        vec![],
+        req.fee_sats,
+        &runtime.keys,
+        CHANGE_ADDRESS_INDEX,
+        kind,
+        &runtime.secp,
+    )
+    .map_err(|e| WalletError::Mweb(e.to_string()))?;
     let spent_ids: Vec<_> = funded.spent_coins.iter().map(|c| c.output_id).collect();
     let (tx, change) = wallet
         .sign_and_extract_funded_mweb(&mut funded, &runtime.keys, &runtime.secp)
@@ -1517,47 +1897,330 @@ pub fn mweb_send(
     Ok(MwebBroadcastResult {
         wtxid,
         fee_sats: req.fee_sats,
+        addresses: Vec::new(),
+    })
+}
+
+/// List unspent MWEB coins (including immature / unconfirmed) for the Coins screen.
+pub fn list_mweb_unspent(
+    runtime: &MwebRuntime,
+    tip_height: u32,
+    data_dir: &Path,
+) -> Vec<MwebUtxoRecord> {
+    let frozen = mweb_frozen::read_ids(data_dir)
+        .map(|f| f.ids)
+        .unwrap_or_default();
+    let labels = utxo_labels::read_labels(data_dir)
+        .map(|f| f.labels)
+        .unwrap_or_default();
+    let mut rows: Vec<MwebUtxoRecord> = runtime
+        .store
+        .db()
+        .unspent_vec()
+        .into_iter()
+        .map(|c| {
+            let confirmations = match c.block_height {
+                Some(h) if tip_height >= h => tip_height.saturating_sub(h).saturating_add(1),
+                _ => 0,
+            };
+            let mature = c.is_spendable(tip_height, MWEB_PEGIN_MATURITY);
+            let maturity_blocks_left = if mature {
+                0
+            } else if c.is_pegin {
+                match c.block_height {
+                    Some(h) => {
+                        let confs = tip_height.saturating_add(1).saturating_sub(h);
+                        MWEB_PEGIN_MATURITY.saturating_sub(confs)
+                    }
+                    None => MWEB_PEGIN_MATURITY,
+                }
+            } else {
+                1
+            };
+            let output_id = hex::encode(c.output_id);
+            let locked = frozen.contains(&output_id);
+            let label = labels.get(&output_id).cloned().unwrap_or_default();
+            MwebUtxoRecord {
+                output_id,
+                amount_sats: c.amount,
+                confirmations,
+                mature,
+                maturity_blocks_left,
+                locked,
+                label,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.confirmations
+            .cmp(&a.confirmations)
+            .then_with(|| b.amount_sats.cmp(&a.amount_sats))
+            .then_with(|| a.output_id.cmp(&b.output_id))
+    });
+    rows
+}
+
+/// Resolve one mature, unfrozen MWEB coin by output id.
+pub fn select_mweb_coin(
+    db: &MwebCoinDatabase,
+    output_id_hex: &str,
+    tip_height: u32,
+    frozen: &BTreeSet<String>,
+    action: &str,
+) -> Result<bdk_mweb::MwebCoin, WalletError> {
+    let id = decode_output_id(output_id_hex.trim()).ok_or_else(|| {
+        WalletError::BuildTx(format!(
+            "invalid MWEB output id '{output_id_hex}' (expected 32-byte hex)"
+        ))
+    })?;
+    let coin = db.get(&id).cloned().ok_or_else(|| {
+        WalletError::BuildTx(format!(
+            "selected MWEB coin {output_id_hex} is not an unspent output in this wallet"
+        ))
+    })?;
+    let id_hex = hex::encode(coin.output_id);
+    if frozen.contains(&id_hex) {
+        return Err(WalletError::BuildTx(format!(
+            "selected private coin is frozen — unfreeze it before {action}"
+        )));
+    }
+    if !coin.is_spendable(tip_height, MWEB_PEGIN_MATURITY) {
+        return Err(WalletError::BuildTx(
+            "selected private coin is not yet spendable (unconfirmed or maturing peg-in)".into(),
+        ));
+    }
+    Ok(coin)
+}
+
+/// Resolve one mature MWEB coin by output id. Refuses greedy multi-coin selection.
+pub fn select_split_coin(
+    db: &MwebCoinDatabase,
+    output_id_hex: &str,
+    tip_height: u32,
+    frozen: &BTreeSet<String>,
+) -> Result<bdk_mweb::MwebCoin, WalletError> {
+    select_mweb_coin(db, output_id_hex, tip_height, frozen, "splitting")
+}
+
+fn owned_coin_from_staged(
+    staged: &bdk_mweb::StagedMwebOutput,
+    index: u32,
+    keys: &MasterKeys,
+    secp: &Secp256k1<bdk_wallet::bitcoin::secp256k1::All>,
+) -> Result<bdk_mweb::MwebCoin, WalletError> {
+    let ke = staged
+        .output
+        .message
+        .standard_fields
+        .as_ref()
+        .ok_or_else(|| WalletError::Mweb("missing standard fields".into()))?
+        .key_exchange_pubkey;
+    let (t, spend) = bdk_mweb::tx_builder::shared_secret_and_spend_for_owned(
+        keys,
+        index,
+        &ke,
+        &staged.output.receiver_public_key,
+        secp,
+    )
+    .map_err(|e| WalletError::Mweb(e.to_string()))?;
+    Ok(bdk_mweb::MwebCoin {
+        output_id: bdk_mweb::output_id(&staged.output),
+        commitment: staged.output.commitment,
+        amount: staged.amount,
+        address_index: index,
+        blind: staged.raw_blind,
+        shared_secret: t,
+        spend_key: Some(spend),
+        block_height: None,
+        is_pegin: false,
+        leaf_index: None,
+    })
+}
+
+/// 1-in-N-out MWEB self-split. Persists `receive_index` before broadcast.
+pub fn mweb_split(
+    wallet: &PersistedWallet<Connection>,
+    runtime: &mut MwebRuntime,
+    data_dir: &Path,
+    rpc_url: Option<&str>,
+    peers: &[String],
+    output_id_hex: &str,
+    recipient_amounts: &[u64],
+    fee_sats: u64,
+    network: WalletNetwork,
+) -> Result<SplitResult, WalletError> {
+    let tip = wallet.latest_checkpoint().height();
+    let frozen = mweb_frozen::read_ids(data_dir)?.ids;
+    let coin = select_split_coin(runtime.store.db(), output_id_hex, tip, &frozen)?;
+    if recipient_amounts.is_empty() {
+        return Err(WalletError::BuildTx(
+            "split needs at least one output".into(),
+        ));
+    }
+    let kind = match network {
+        WalletNetwork::Mainnet => NetworkKind::Main,
+        WalletNetwork::Testnet => NetworkKind::Test,
+    };
+    let start = runtime.receive_index;
+    let mut recipients = Vec::with_capacity(recipient_amounts.len());
+    let mut indexes = Vec::with_capacity(recipient_amounts.len());
+    for (i, amount) in recipient_amounts.iter().enumerate() {
+        let idx = start.saturating_add(i as u32);
+        let addr = runtime
+            .keys
+            .address(idx, kind, &runtime.secp)
+            .map_err(|e| WalletError::Mweb(e.to_string()))?;
+        recipients.push((addr, *amount));
+        indexes.push(idx);
+    }
+    runtime.receive_index = start.saturating_add(recipient_amounts.len() as u32);
+    // Persist indexes before broadcast so a landed tx cannot reuse them.
+    runtime.persist(data_dir)?;
+
+    let mut funded = bdk_mweb::fund_mweb_spend(
+        vec![coin],
+        recipients,
+        vec![],
+        fee_sats,
+        &runtime.keys,
+        CHANGE_ADDRESS_INDEX,
+        kind,
+        &runtime.secp,
+    )
+    .map_err(|e| WalletError::Mweb(e.to_string()))?;
+    if funded.spent_coins.len() != 1 {
+        return Err(WalletError::BuildTx(
+            "Split uses exactly one coin".into(),
+        ));
+    }
+    let spent_ids: Vec<_> = funded.spent_coins.iter().map(|c| c.output_id).collect();
+    let (tx, _change) = wallet
+        .sign_and_extract_funded_mweb(&mut funded, &runtime.keys, &runtime.secp)
+        .map_err(|e| WalletError::Mweb(e.to_string()))?;
+    broadcast_mweb_tx(&tx, rpc_url, peers, network)?;
+    let wtxid = tx.compute_wtxid().to_string();
+    for id in &spent_ids {
+        let _ = runtime.store.db_mut().mark_spent(id);
+    }
+    let mut output_ids = Vec::new();
+    let mut recip_i = 0usize;
+    for staged in &funded.staged_outputs {
+        let index = if let Some(ci) = staged.change_index {
+            ci
+        } else {
+            let idx = *indexes.get(recip_i).ok_or_else(|| {
+                WalletError::Mweb("split staged output count mismatch".into())
+            })?;
+            recip_i += 1;
+            idx
+        };
+        let mut owned = owned_coin_from_staged(staged, index, &runtime.keys, &runtime.secp)?;
+        owned.block_height = None;
+        output_ids.push(hex::encode(owned.output_id));
+        runtime.store.db_mut().insert(owned);
+    }
+    runtime.history.record(MwebHistoryEntry {
+        id: wtxid.clone(),
+        kind: TxKind::MwebSplit,
+        net_sats: -(fee_sats as i64),
+        fee_sats: Some(fee_sats),
+        timestamp: now_ts(),
+        output_ids,
+        input_ids: spent_ids.iter().map(hex::encode).collect(),
+        confirmed_height: None,
+    });
+    Ok(SplitResult {
+        txid: wtxid,
+        fee_sats,
+        output_count: recipient_amounts.len() as u32,
     })
 }
 
 pub fn pegout(
     wallet: &PersistedWallet<Connection>,
     runtime: &mut MwebRuntime,
+    data_dir: &Path,
     rpc_url: Option<&str>,
     peers: &[String],
     req: PegoutRequest,
     network: WalletNetwork,
 ) -> Result<MwebBroadcastResult, WalletError> {
     let net = network.to_bitcoin_network();
-    let dest = Address::from_str(&req.address)
-        .map_err(|e| WalletError::InvalidAddress(e.to_string()))?
-        .require_network(net)
-        .map_err(|e| WalletError::InvalidAddress(e.to_string()))?;
-
-    let dust_relay = bdk_wallet::bitcoin::FeeRate::from_sat_per_vb(30)
+    let dust_relay = FeeRate::from_sat_per_vb(30)
         .ok_or_else(|| WalletError::BuildTx("internal dust fee rate".into()))?;
-    let min_non_dust = dest.script_pubkey().minimal_non_dust_custom(dust_relay);
-    if Amount::from_sat(req.amount_sats) < min_non_dust {
-        return Err(WalletError::BuildTx(format!(
-            "peg-out amount {} litoshis is below dust limit ({})",
-            req.amount_sats,
-            min_non_dust.to_sat()
-        )));
-    }
 
-    let mut funded = wallet
-        .fund_mweb_pegout(
-            runtime.store.db(),
-            &runtime.keys,
-            dest.script_pubkey(),
-            bdk_wallet::MwebSpendParams::new(
-                Amount::from_sat(req.amount_sats),
-                Amount::from_sat(req.fee_sats),
-                CHANGE_ADDRESS_INDEX,
-            ),
-            &runtime.secp,
-        )
-        .map_err(|e| WalletError::Mweb(e.to_string()))?;
+    let parse_dest = |raw: &str| -> Result<Address, WalletError> {
+        Address::from_str(raw)
+            .map_err(|e| WalletError::InvalidAddress(e.to_string()))?
+            .require_network(net)
+            .map_err(|e| WalletError::InvalidAddress(e.to_string()))
+    };
+
+    let pegouts: Vec<(ScriptBuf, u64)> = if req.per_coin {
+        if req.addresses.len() != req.output_amounts.len() || req.output_amounts.is_empty() {
+            return Err(WalletError::BuildTx(
+                "per-coin peg-out needs one fresh public address per private coin".into(),
+            ));
+        }
+        let mut out = Vec::with_capacity(req.output_amounts.len());
+        for (addr, amount) in req.addresses.iter().zip(req.output_amounts.iter()) {
+            let dest = parse_dest(addr)?;
+            let min_non_dust = dest.script_pubkey().minimal_non_dust_custom(dust_relay);
+            if Amount::from_sat(*amount) < min_non_dust {
+                return Err(WalletError::BuildTx(format!(
+                    "peg-out amount {} litoshis is below dust limit ({})",
+                    amount,
+                    min_non_dust.to_sat()
+                )));
+            }
+            out.push((dest.script_pubkey(), *amount));
+        }
+        out
+    } else {
+        let dest = parse_dest(&req.address)?;
+        let min_non_dust = dest.script_pubkey().minimal_non_dust_custom(dust_relay);
+        if Amount::from_sat(req.amount_sats) < min_non_dust {
+            return Err(WalletError::BuildTx(format!(
+                "peg-out amount {} litoshis is below dust limit ({})",
+                req.amount_sats,
+                min_non_dust.to_sat()
+            )));
+        }
+        vec![(dest.script_pubkey(), req.amount_sats)]
+    };
+
+    let tip = wallet.latest_checkpoint().height();
+    let frozen = mweb_frozen::read_ids(data_dir)?.ids;
+    let selected = normalize_selected_ids(req.selected_output_ids.as_deref());
+    let needed = req.amount_sats.saturating_add(req.fee_sats);
+    let coins = resolve_spend_coins(
+        runtime.store.db(),
+        tip,
+        &frozen,
+        selected.as_deref(),
+        needed,
+        "swapping",
+    )?;
+    if req.per_coin && coins.len() != req.output_amounts.len() {
+        return Err(WalletError::BuildTx(
+            "per-coin peg-out coin count does not match planned public outputs".into(),
+        ));
+    }
+    let kind = match network {
+        WalletNetwork::Mainnet => NetworkKind::Main,
+        WalletNetwork::Testnet => NetworkKind::Test,
+    };
+    let mut funded = bdk_mweb::fund_mweb_spend(
+        coins,
+        vec![],
+        pegouts,
+        req.fee_sats,
+        &runtime.keys,
+        CHANGE_ADDRESS_INDEX,
+        kind,
+        &runtime.secp,
+    )
+    .map_err(|e| WalletError::Mweb(e.to_string()))?;
     let spent_ids: Vec<_> = funded.spent_coins.iter().map(|c| c.output_id).collect();
     let (tx, change) = wallet
         .sign_and_extract_funded_mweb(&mut funded, &runtime.keys, &runtime.secp)
@@ -1583,9 +2246,17 @@ pub fn pegout(
         input_ids: spent_ids.iter().map(hex::encode).collect(),
         confirmed_height: None,
     });
+    let addresses = if req.per_coin {
+        req.addresses
+    } else if !req.address.is_empty() {
+        vec![req.address]
+    } else {
+        Vec::new()
+    };
     Ok(MwebBroadcastResult {
         wtxid,
         fee_sats: req.fee_sats,
+        addresses,
     })
 }
 

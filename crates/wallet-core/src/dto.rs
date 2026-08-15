@@ -135,6 +135,14 @@ pub struct SetUtxoLockedRequest {
     pub locked: bool,
 }
 
+/// Freeze or unfreeze a private (MWEB) coin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetMwebUtxoLockedRequest {
+    /// 32-byte output id hex.
+    pub output_id: String,
+    pub locked: bool,
+}
+
 /// Set or clear a local UTXO label (`txid:vout`). Empty label deletes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetUtxoLabelRequest {
@@ -180,6 +188,10 @@ pub enum TxKind {
     Pegout,
     MwebSend,
     MwebReceive,
+    /// Transparent 1-in-N-out self-split.
+    Split,
+    /// MWEB 1-in-N-out self-split.
+    MwebSplit,
 }
 
 /// A wallet-relevant transaction for history UI.
@@ -199,7 +211,7 @@ pub struct TxRecord {
     pub confirmations: u32,
     /// Confirmation timestamp (unix seconds) when known.
     pub timestamp: Option<u64>,
-    /// Kind of activity (transparent, peg-in, peg-out, MWEB send/receive).
+    /// Kind of activity (transparent, peg-in, peg-out, MWEB send/receive/split).
     #[serde(default)]
     pub kind: TxKind,
 }
@@ -530,6 +542,10 @@ pub struct MwebSendRequest {
     /// Send all spendable private funds minus the kernel fee.
     #[serde(default)]
     pub drain: bool,
+    /// When non-empty, spend only these MWEB output ids (hex). Combined with
+    /// [`Self::drain`], empties the selected coins (minus the kernel fee).
+    #[serde(default)]
+    pub selected_output_ids: Option<Vec<String>>,
 }
 
 /// Dry-run of a private send.
@@ -537,20 +553,45 @@ pub struct MwebSendRequest {
 pub struct MwebSendPreview {
     pub amount_sats: u64,
     pub fee_sats: u64,
+    /// True when selected (or auto-picked) inputs exceed amount + fee.
+    #[serde(default)]
+    pub creates_change: bool,
 }
 
 /// Request to peg MWEB out to a transparent address. `fee_sats` of `0` means auto.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PegoutRequest {
+    /// Destination for a typed-amount (single HogEx) peg-out. Ignored when
+    /// [`Self::per_coin`] is true; the wallet reveals fresh receive addresses.
+    #[serde(default)]
     pub address: String,
-    /// Ignored when [`Self::drain`] is true.
+    /// Ignored when [`Self::drain`] is true or coins are selected (per-coin).
     #[serde(default)]
     pub amount_sats: u64,
     #[serde(default)]
     pub fee_sats: u64,
-    /// Peg out all spendable private funds minus the kernel fee.
+    /// Peg out all spendable private funds minus the kernel fee, one public
+    /// output per private coin.
     #[serde(default)]
     pub drain: bool,
+    /// When non-empty, spend only these MWEB output ids (hex). Combined with
+    /// [`Self::drain`], empties the selected coins (minus the kernel fee).
+    /// Non-empty selection is always per-coin (one HogEx output each).
+    #[serde(default)]
+    pub selected_output_ids: Option<Vec<String>>,
+    /// Filled by the resolver: one HogEx amount per spent coin when per-coin.
+    /// Clients should leave this empty.
+    #[serde(default)]
+    pub output_amounts: Vec<u64>,
+    /// Filled on broadcast for per-coin peg-outs (fresh receive addresses).
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    /// Filled by the resolver. When true, emit one HogEx output per coin.
+    #[serde(default)]
+    pub per_coin: bool,
+    /// Index into [`Self::output_amounts`] that absorbed the kernel fee.
+    #[serde(default)]
+    pub fee_output_index: Option<u32>,
 }
 
 /// Dry-run of a peg-out.
@@ -560,6 +601,18 @@ pub struct PegoutPreview {
     pub fee_sats: u64,
     /// Minimum non-dust for the destination script (litoshis).
     pub dust_sats: u64,
+    /// True when selected (or auto-picked) inputs exceed amount + fee.
+    #[serde(default)]
+    pub creates_change: bool,
+    /// Number of HogEx (public) outputs. Typed-amount path is always 1.
+    #[serde(default)]
+    pub output_count: u32,
+    /// Public output amounts in order. Sum equals [`Self::amount_sats`].
+    #[serde(default)]
+    pub output_amounts: Vec<u64>,
+    /// Which output is paying the kernel fee (per-coin path only).
+    #[serde(default)]
+    pub fee_output_index: Option<u32>,
 }
 
 /// Result of an MWEB-only broadcast (identified by wtxid).
@@ -567,4 +620,83 @@ pub struct PegoutPreview {
 pub struct MwebBroadcastResult {
     pub wtxid: String,
     pub fee_sats: u64,
+    /// Fresh public receive addresses created for this peg-out (empty for MWEB send).
+    #[serde(default)]
+    pub addresses: Vec<String>,
+}
+
+/// Public (transparent) or Private (MWEB) split.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplitChain {
+    Public,
+    Private,
+}
+
+/// One spendable MWEB coin for the Coins list / split picker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MwebUtxoRecord {
+    pub output_id: String,
+    pub amount_sats: u64,
+    pub confirmations: u32,
+    /// False for unconfirmed coins and immature peg-ins.
+    pub mature: bool,
+    /// Blocks remaining until spendable (0 when mature).
+    #[serde(default)]
+    pub maturity_blocks_left: u32,
+    /// Frozen coins are skipped by automatic coin selection.
+    #[serde(default)]
+    pub locked: bool,
+    /// Optional local note (non-secret sidecar).
+    #[serde(default)]
+    pub label: String,
+}
+
+/// One output in a split plan (change is flagged).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SplitOutput {
+    pub amount_sats: u64,
+    #[serde(default)]
+    pub is_change: bool,
+}
+
+/// Request to preview or broadcast a 1-in-N-out self-split.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitRequest {
+    pub chain: SplitChain,
+    /// Public: `txid:vout`. Private: MWEB output id hex.
+    pub input: String,
+    /// Equal split into this many outputs (2–50). Mutually exclusive with [`Self::amounts`].
+    #[serde(default)]
+    pub equal_count: Option<u32>,
+    /// Denomination amounts in litoshis (one entry per output, not including change).
+    #[serde(default)]
+    pub amounts: Vec<u64>,
+    /// Public sat/vB. When omitted or zero, the wallet estimates from Electrum.
+    #[serde(default)]
+    pub fee_rate_sat_vb: Option<u64>,
+    /// When 0, preview estimates. `split_coin` must pass the preview fee.
+    #[serde(default)]
+    pub fee_sats: u64,
+}
+
+/// Dry-run of a split: exact outputs and fee that [`crate::WalletApp::split_coin`] will build.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SplitPreview {
+    pub input_sats: u64,
+    pub outputs: Vec<SplitOutput>,
+    pub fee_sats: u64,
+    pub fee_rate_sat_vb: u64,
+    pub change_sats: u64,
+    #[serde(default)]
+    pub creates_change: bool,
+}
+
+/// Result of a split broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitResult {
+    /// Transparent txid or MWEB wtxid.
+    pub txid: String,
+    pub fee_sats: u64,
+    pub output_count: u32,
 }

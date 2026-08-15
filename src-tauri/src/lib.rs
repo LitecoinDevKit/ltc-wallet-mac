@@ -7,10 +7,11 @@ use wallet_core::{
     AddressReuseHint, CombinedSummary, ContactRecord, CreateWalletRequest, CreateWalletResponse,
     DeleteContactRequest, ElectrumProbe, FeeEstimate, FeeLadder, HistoryExportFormat,
     MetadataImportResult, MetricSeries, MigrateEncryptRequest, MwebBroadcastResult,
-    MwebSendPreview, MwebSendRequest, MwebSyncProgress, NetworkPulse, PeginPreview, PeginRequest,
-    PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest, RevealMnemonicRequest,
-    RevealMnemonicResponse, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
-    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment, TxRecord, UnlockRequest,
+    MwebSendPreview, MwebSendRequest, MwebSyncProgress, MwebUtxoRecord, NetworkPulse, PeginPreview,
+    PeginRequest, PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest,
+    RevealMnemonicRequest, RevealMnemonicResponse, SendPreview, SendRequest, SendResult,
+    SetTxLabelRequest, SetUtxoLabelRequest, SetMwebUtxoLockedRequest, SetUtxoLockedRequest,
+    SplitPreview, SplitRequest, SplitResult, SyncResult, TxEnrichment, TxRecord, UnlockRequest,
     UpdateSettingsRequest, UpsertContactRequest, UtxoRecord, WalletApp, WalletSettings,
     WalletSummary,
 };
@@ -305,12 +306,55 @@ async fn list_unspent(state: State<'_, Arc<WalletApp>>) -> Result<Vec<UtxoRecord
 }
 
 #[tauri::command]
+async fn list_mweb_unspent(
+    state: State<'_, Arc<WalletApp>>,
+) -> Result<Vec<MwebUtxoRecord>, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.list_mweb_unspent().map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn preview_split(
+    state: State<'_, Arc<WalletApp>>,
+    req: SplitRequest,
+) -> Result<SplitPreview, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.preview_split(req).map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn split_coin(
+    state: State<'_, Arc<WalletApp>>,
+    req: SplitRequest,
+) -> Result<SplitResult, String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.split_coin(req).map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn set_utxo_locked(
     state: State<'_, Arc<WalletApp>>,
     req: SetUtxoLockedRequest,
 ) -> Result<(), String> {
     let wallet = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || wallet.set_utxo_locked(req).map_err(map_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_mweb_utxo_locked(
+    state: State<'_, Arc<WalletApp>>,
+    req: SetMwebUtxoLockedRequest,
+) -> Result<(), String> {
+    let wallet = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || wallet.set_mweb_utxo_locked(req).map_err(map_err))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -695,7 +739,11 @@ pub fn run() {
             get_mweb_receive_address,
             estimate_fee,
             list_unspent,
+            list_mweb_unspent,
+            preview_split,
+            split_coin,
             set_utxo_locked,
+            set_mweb_utxo_locked,
             set_utxo_label,
             export_metadata,
             import_metadata,

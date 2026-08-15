@@ -42,8 +42,10 @@ MWEB peers default to `127.0.0.1:9333` (user-configurable). Electrum TLS certifi
 - Insights (litview): `fetch_network_pulse` / `fetch_insight_charts`
 - `get_tx_labels` / `set_tx_label` / `export_history`
 - `list_contacts` / `upsert_contact` / `delete_contact`
-- `list_unspent` / `set_utxo_locked` / `set_utxo_label` (Public coin control; `SendRequest.selected_outpoints`)
-- `export_metadata_json` / `import_metadata_json` (contacts + tx/utxo labels; merge on import)
+- `list_unspent` / `list_mweb_unspent` / `set_utxo_locked` / `set_mweb_utxo_locked` / `set_utxo_label` (Public + Private coin control; `SendRequest.selected_outpoints`; `MwebSendRequest` / `PegoutRequest.selected_output_ids`)
+- `preview_split` / `split_coin` (Coins → 1-in-N-out self-split; Public + MWEB; `TxKind::Split` / `MwebSplit`)
+- `preview_pegout` / `pegout`: typed amount stays 1 HogEx output; Max / chosen coins are **N-to-N** (one fresh `ltc1` per private coin, fee from the largest). History is still one peg-out entry.
+- `export_metadata_json` / `import_metadata_json` (contacts + tx/utxo labels + split txids + frozen MWEB ids; merge on import)
 - `test_electrum` / `default_electrum_urls`
 - `pegin` / `mweb_send` / `pegout` / `resync_mweb`
 
@@ -62,7 +64,10 @@ Boot → Unlock | Migrate | Onboarding → Mnemonic backup → verify quiz → H
 - **Done (P2):** Display unit LTC|litoshis (`ltc-display-unit`, Settings + hero tap); Public BIP21 amount/label QR + copy payment link + Send URI parse; fee chips time labels + Economy + custom sat/vB + `estimate_fee` when explorer hints off; receive toast/history pulse + first-receive modal (`ltc-first-receive-seen`).
 - **Done (P3):** Hide balances (`ltc-hide-balances`, Settings + hero LTC→litoshis→hidden); send-side transparent reuse warn via `address_reuse_hint` (warn-only; Private never warns); Settings “What leaves this computer” panel; tx labels in wipeable `tx_labels.json` sidecar (confirm note + History/detail edit).
 - **Done (P4 shippable):** History search/filter + CSV/JSON export; contacts (`contacts.json`, name + one address + Public/Private, Send picker); Public coin control for Send and Public→Private Swap (`list_unspent`, freeze, opt-in `selected_outpoints`).
+- **Done (feat/private-coin-control):** Coins Private freeze/labels; Send private and peg-out coin pickers (`selected_output_ids`); frozen coins skipped by automatic MWEB selection.
 - **Done (post-competitive M2–M4):** Broadcast failure recovery modal; persistent Electrum/MWEB status strip; UTXO labels + change warning; Coins nav; metadata export/import; Electrum presets + test connection. Live E2E checklist [`MWEB_E2E.md`](MWEB_E2E.md); notarization runbook [`NOTARIZATION.md`](NOTARIZATION.md).
+- **Done (feat/denomination-split):** Coins Public/Private lists; Split modal (equal + preset denominations) as 1-in-N-out self-transfer. Simple Send stays single-recipient.
+- **Done (feat/n-to-n-pegout):** Swap → Public Max / Choose coins emit one HogEx output per private coin (one kernel, fee from largest). Typed amount with no coins picked stays 1-out.
 - **Next (P4 deferred):** Multi-wallet, hardware wallets, Tor/proxy — future architecture.
 
 ## Implementation status

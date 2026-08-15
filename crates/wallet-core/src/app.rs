@@ -14,23 +14,26 @@ use bdk_wallet::{KeychainKind, PersistedWallet, SignOptions};
 
 use crate::descriptors::{self, create_params, load_params};
 use crate::dto::{
-    AddressReuseHint, CombinedSummary, CreateWalletRequest, CreateWalletResponse, ElectrumProbe,
-    FeeEstimate, ContactRecord, DeleteContactRequest, MigrateEncryptRequest, MwebBroadcastResult,
-    MwebScheme, MwebSendPreview, MwebSendRequest, PeginPreview, PeginRequest, PeginResult,
-    PegoutPreview, PegoutRequest, RestoreWalletRequest, RevealMnemonicRequest,
+    AddressReuseHint, CombinedSummary, ContactRecord, CreateWalletRequest, CreateWalletResponse,
+    DeleteContactRequest, ElectrumProbe, FeeEstimate, MigrateEncryptRequest, MwebBroadcastResult,
+    MwebScheme, MwebSendPreview, MwebSendRequest, MwebUtxoRecord, PeginPreview, PeginRequest,
+    PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest, RevealMnemonicRequest,
     RevealMnemonicResponse, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
-    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxKind, TxRecord, UpsertContactRequest,
-    UtxoRecord, UnlockRequest, UpdateSettingsRequest, WalletSettings, WalletSummary,
-    DEFAULT_MWEB_FEE_SATS,
+    SetUtxoLabelRequest, SetMwebUtxoLockedRequest, SetUtxoLockedRequest, SplitChain, SplitPreview,
+    SplitRequest, SplitResult, SyncResult, TxKind, TxRecord, UnlockRequest, UpdateSettingsRequest,
+    UpsertContactRequest, UtxoRecord, WalletSettings, WalletSummary, DEFAULT_MWEB_FEE_SATS,
 };
 use crate::contacts;
 use crate::labels;
 use crate::metadata::{self, MetadataImportResult};
+use crate::split::{self, PlanParams};
+use crate::split_ids;
 use crate::utxo_labels;
 use crate::electrum::{self, BATCH_SIZE, MIN_FEE_RATE_SAT_VB, STOP_GAP};
 use crate::error::WalletError;
 use crate::meta::{self, WalletMeta};
 use crate::mweb::{self, MwebRuntime};
+use crate::mweb_frozen;
 use crate::network::WalletNetwork;
 use crate::secrets::{EncryptedFileSecretStore, SecretStore, UnlockableSecretStore};
 use crate::seed::MasterSecret;
@@ -392,6 +395,9 @@ impl WalletApp {
         let mut guard = self.lock_state()?;
         let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
         let tip = state.wallet.local_chain().tip().height();
+        let split_ids = split_ids::read_ids(&state.data_dir)
+            .map(|f| f.txids)
+            .unwrap_or_default();
         let mut records: Vec<TxRecord> = state
             .wallet
             .transactions()
@@ -409,8 +415,14 @@ impl WalletApp {
                     }
                     ChainPosition::Unconfirmed { first_seen, .. } => (None, 0, *first_seen),
                 };
+                let txid = tx.txid.to_string();
+                let kind = if split_ids.contains(&txid) {
+                    TxKind::Split
+                } else {
+                    TxKind::Transparent
+                };
                 TxRecord {
-                    txid: tx.txid.to_string(),
+                    txid,
                     net_sats,
                     sent_sats,
                     received_sats,
@@ -418,7 +430,7 @@ impl WalletApp {
                     height,
                     confirmations,
                     timestamp,
-                    kind: TxKind::Transparent,
+                    kind,
                 }
             })
             .collect();
@@ -570,6 +582,17 @@ impl WalletApp {
             .persist(&mut state.db)
             .map_err(|e| WalletError::Persist(e.to_string()))?;
         Ok(())
+    }
+
+    /// Freeze or unfreeze a private (MWEB) coin (wipeable sidecar).
+    pub fn set_mweb_utxo_locked(&self, req: SetMwebUtxoLockedRequest) -> Result<(), WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        let _ = state.mweb.as_ref().ok_or_else(|| {
+            WalletError::Mweb("MWEB runtime not initialized".into())
+        })?;
+        mweb_frozen::set_locked(&state.data_dir, &req.output_id, req.locked)
     }
 
     /// Set or clear a local UTXO label (non-secret sidecar).
@@ -1082,6 +1105,7 @@ impl WalletApp {
         Ok(MwebSendPreview {
             amount_sats: resolved.amount_sats,
             fee_sats: resolved.fee_sats,
+            creates_change: mweb_selection_creates_change(state, &resolved)?,
         })
     }
 
@@ -1092,14 +1116,22 @@ impl WalletApp {
         let req = resolve_mweb_send_request(state, req)?;
         let rpc_url = state.litecoin_rpc_url.clone();
         let peers = state.mweb_peers.clone();
+        let network = state.network;
+        let data_dir = state.data_dir.clone();
         let mweb = state
             .mweb
             .as_mut()
             .ok_or_else(|| WalletError::Mweb("MWEB runtime not initialized".into()))?;
-        let network = state.network;
-        let result =
-            mweb::mweb_send(&state.wallet, mweb, rpc_url.as_deref(), &peers, req, network)?;
-        mweb.persist(&state.data_dir)?;
+        let result = mweb::mweb_send(
+            &state.wallet,
+            mweb,
+            &data_dir,
+            rpc_url.as_deref(),
+            &peers,
+            req,
+            network,
+        )?;
+        mweb.persist(&data_dir)?;
         Ok(result)
     }
 
@@ -1108,28 +1140,164 @@ impl WalletApp {
         let mut guard = self.lock_state()?;
         let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
         let (resolved, dust_sats) = resolve_pegout_request(state, req)?;
-        Ok(PegoutPreview {
-            amount_sats: resolved.amount_sats,
-            fee_sats: resolved.fee_sats,
-            dust_sats,
-        })
+        pegout_preview_from_resolved(&resolved, dust_sats, state)
     }
 
     pub fn pegout(&self, req: PegoutRequest) -> Result<MwebBroadcastResult, WalletError> {
         self.ensure_unlocked()?;
         let mut guard = self.lock_state()?;
         let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
-        let (req, _) = resolve_pegout_request(state, req)?;
+        let (mut req, _) = resolve_pegout_request(state, req)?;
+        if req.per_coin {
+            let n = req.output_amounts.len();
+            if n == 0 {
+                return Err(WalletError::BuildTx(
+                    "per-coin peg-out needs at least one public output".into(),
+                ));
+            }
+            let mut addresses = Vec::with_capacity(n);
+            for _ in 0..n {
+                addresses.push(
+                    state
+                        .wallet
+                        .reveal_next_address(KeychainKind::External)
+                        .to_string(),
+                );
+            }
+            state
+                .wallet
+                .persist(&mut state.db)
+                .map_err(|e| WalletError::Persist(e.to_string()))?;
+            req.addresses = addresses;
+        } else if req.address.trim().is_empty() {
+            return Err(WalletError::InvalidAddress(
+                "peg-out destination address required".into(),
+            ));
+        }
         let rpc_url = state.litecoin_rpc_url.clone();
         let peers = state.mweb_peers.clone();
+        let network = state.network;
+        let data_dir = state.data_dir.clone();
         let mweb = state
             .mweb
             .as_mut()
             .ok_or_else(|| WalletError::Mweb("MWEB runtime not initialized".into()))?;
-        let network = state.network;
-        let result = mweb::pegout(&state.wallet, mweb, rpc_url.as_deref(), &peers, req, network)?;
-        mweb.persist(&state.data_dir)?;
+        let result = mweb::pegout(
+            &state.wallet,
+            mweb,
+            &data_dir,
+            rpc_url.as_deref(),
+            &peers,
+            req,
+            network,
+        )?;
+        mweb.persist(&data_dir)?;
         Ok(result)
+    }
+
+    pub fn list_mweb_unspent(&self) -> Result<Vec<MwebUtxoRecord>, WalletError> {
+        self.ensure_unlocked()?;
+        let guard = self.lock_state()?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        let mweb = state.mweb.as_ref().ok_or_else(|| {
+            WalletError::Mweb("MWEB runtime not initialized".into())
+        })?;
+        let tip = state.wallet.latest_checkpoint().height();
+        Ok(mweb::list_mweb_unspent(mweb, tip, &state.data_dir))
+    }
+
+    /// Lab-only: 32-byte scan/spend hex plus the current MWEB receive address.
+    /// Callers must write this to a chmod 600 file and never log the hex.
+    pub fn export_mweb_coinswapd_secrets(&self) -> Result<(String, String, String), WalletError> {
+        self.ensure_unlocked()?;
+        let mut guard = self.lock_state()?;
+        let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
+        let mweb = state.mweb.as_mut().ok_or_else(|| {
+            WalletError::Mweb("MWEB runtime not initialized".into())
+        })?;
+        let scan = hex::encode(mweb.keys.scan.secret_bytes());
+        let spend = hex::encode(mweb.keys.spend.secret_bytes());
+        let dest = mweb.receive_address(state.network)?;
+        mweb.persist(&state.data_dir)?;
+        Ok((scan, spend, dest))
+    }
+
+    pub fn preview_split(&self, req: SplitRequest) -> Result<SplitPreview, WalletError> {
+        self.ensure_unlocked()?;
+        let mut guard = self.lock_state()?;
+        let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
+        plan_split_request(state, &req)
+    }
+
+    pub fn split_coin(&self, req: SplitRequest) -> Result<SplitResult, WalletError> {
+        self.ensure_unlocked()?;
+        let mut guard = self.lock_state()?;
+        let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
+        let preview = plan_split_request(state, &req)?;
+        match req.chain {
+            SplitChain::Public => {
+                let (psbt, fee_sats) = build_public_split_psbt(state, &req.input, &preview)?;
+                let mut psbt = psbt;
+                let finalized = state
+                    .wallet
+                    .sign(&mut psbt, SignOptions::default())
+                    .map_err(|e| WalletError::Sign(e.to_string()))?;
+                if !finalized {
+                    return Err(WalletError::Sign("transaction not fully signed".into()));
+                }
+                let tx = psbt
+                    .extract_tx()
+                    .map_err(|e| WalletError::Sign(e.to_string()))?;
+                let client = connect_electrum(state)?;
+                client
+                    .transaction_broadcast(&tx)
+                    .map_err(|e| {
+                        WalletError::Electrum(crate::error::humanize_broadcast_error(&e.to_string()))
+                    })?;
+                state
+                    .wallet
+                    .apply_unconfirmed_txs([(tx.clone(), crate::mweb_history::now_ts())]);
+                state
+                    .wallet
+                    .persist(&mut state.db)
+                    .map_err(|e| WalletError::Persist(e.to_string()))?;
+                let txid = tx.compute_txid().to_string();
+                split_ids::record_txid(&state.data_dir, &txid)?;
+                Ok(SplitResult {
+                    txid,
+                    fee_sats,
+                    output_count: preview.outputs.len() as u32,
+                })
+            }
+            SplitChain::Private => {
+                let recipients: Vec<u64> = preview
+                    .outputs
+                    .iter()
+                    .filter(|o| !o.is_change)
+                    .map(|o| o.amount_sats)
+                    .collect();
+                let rpc_url = state.litecoin_rpc_url.clone();
+                let peers = state.mweb_peers.clone();
+                let network = state.network;
+                let data_dir = state.data_dir.clone();
+                let mweb = state.mweb.as_mut().ok_or_else(|| {
+                    WalletError::Mweb("MWEB runtime not initialized".into())
+                })?;
+                let result = mweb::mweb_split(
+                    &state.wallet,
+                    mweb,
+                    &data_dir,
+                    rpc_url.as_deref(),
+                    &peers,
+                    &req.input,
+                    &recipients,
+                    preview.fee_sats,
+                    network,
+                )?;
+                mweb.persist(&data_dir)?;
+                Ok(result)
+            }
+        }
     }
 
     fn create_or_restore(
@@ -1435,6 +1603,34 @@ impl MemoryBackedApp {
         Ok(collect_unspent(state))
     }
 
+    pub fn preview_split(&self, req: SplitRequest) -> Result<SplitPreview, WalletError> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| WalletError::Persist("wallet state lock poisoned".into()))?;
+        let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
+        plan_split_request(state, &req)
+    }
+
+    /// Test helper: build a public split PSBT and return (inputs, outputs, fee).
+    pub fn public_split_io_count(
+        &self,
+        req: SplitRequest,
+    ) -> Result<(usize, usize, u64), WalletError> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| WalletError::Persist("wallet state lock poisoned".into()))?;
+        let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
+        let preview = plan_split_request(state, &req)?;
+        let (psbt, fee) = build_public_split_psbt(state, &req.input, &preview)?;
+        Ok((
+            psbt.unsigned_tx.input.len(),
+            psbt.unsigned_tx.output.len(),
+            fee,
+        ))
+    }
+
     pub fn set_utxo_locked(&self, req: SetUtxoLockedRequest) -> Result<(), WalletError> {
         let mut guard = self
             .state
@@ -1452,6 +1648,61 @@ impl MemoryBackedApp {
             .persist(&mut state.db)
             .map_err(|e| WalletError::Persist(e.to_string()))?;
         Ok(())
+    }
+
+    pub fn set_mweb_utxo_locked(&self, req: SetMwebUtxoLockedRequest) -> Result<(), WalletError> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| WalletError::Persist("wallet state lock poisoned".into()))?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        mweb_frozen::set_locked(&state.data_dir, &req.output_id, req.locked)
+    }
+
+    pub fn set_utxo_label(&self, req: SetUtxoLabelRequest) -> Result<(), WalletError> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| WalletError::Persist("wallet state lock poisoned".into()))?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        utxo_labels::set_label(&state.data_dir, &req.outpoint, &req.label)
+    }
+
+    pub fn list_mweb_unspent(&self) -> Result<Vec<MwebUtxoRecord>, WalletError> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| WalletError::Persist("wallet state lock poisoned".into()))?;
+        let state = guard.as_ref().ok_or(WalletError::NotLoaded)?;
+        let mweb = state.mweb.as_ref().ok_or_else(|| {
+            WalletError::Mweb("MWEB runtime not initialized".into())
+        })?;
+        let tip = state.wallet.latest_checkpoint().height();
+        Ok(mweb::list_mweb_unspent(mweb, tip, &state.data_dir))
+    }
+
+    pub fn preview_mweb_send(&self, req: MwebSendRequest) -> Result<MwebSendPreview, WalletError> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| WalletError::Persist("wallet state lock poisoned".into()))?;
+        let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
+        let resolved = resolve_mweb_send_request(state, req)?;
+        Ok(MwebSendPreview {
+            amount_sats: resolved.amount_sats,
+            fee_sats: resolved.fee_sats,
+            creates_change: mweb_selection_creates_change(state, &resolved)?,
+        })
+    }
+
+    pub fn preview_pegout(&self, req: PegoutRequest) -> Result<PegoutPreview, WalletError> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| WalletError::Persist("wallet state lock poisoned".into()))?;
+        let state = guard.as_mut().ok_or(WalletError::NotLoaded)?;
+        let (resolved, dust_sats) = resolve_pegout_request(state, req)?;
+        pegout_preview_from_resolved(&resolved, dust_sats, state)
     }
 
     /// Test helper: mutate the in-memory wallet (for funding UTXOs in integration tests).
@@ -1706,7 +1957,21 @@ fn resolve_mweb_send_request(
         .as_ref()
         .ok_or_else(|| WalletError::Mweb("MWEB runtime not initialized".into()))?;
     let tip = state.wallet.latest_checkpoint().height();
-    let spendable = mweb::spendable_mweb_sats(mweb, tip);
+    let frozen = mweb_frozen::read_ids(&state.data_dir)?.ids;
+    let selected = mweb::normalize_selected_ids(req.selected_output_ids.as_deref());
+    let spendable = if let Some(ref ids) = selected {
+        let coins = mweb::resolve_spend_coins(
+            mweb.store.db(),
+            tip,
+            &frozen,
+            Some(ids.as_slice()),
+            0,
+            "spending",
+        )?;
+        coins.iter().map(|c| c.amount).sum()
+    } else {
+        mweb::spendable_mweb_sats(mweb, tip, &frozen)
+    };
     let amount_sats = if req.drain {
         spendable.checked_sub(fee_sats).ok_or_else(|| {
             WalletError::BuildTx(format!(
@@ -1740,6 +2005,33 @@ fn resolve_mweb_send_request(
         amount_sats,
         fee_sats,
         drain: false,
+        selected_output_ids: selected,
+    })
+}
+
+fn pegout_preview_from_resolved(
+    resolved: &PegoutRequest,
+    dust_sats: u64,
+    state: &WalletState,
+) -> Result<PegoutPreview, WalletError> {
+    let creates_change = if resolved.per_coin {
+        false
+    } else {
+        pegout_selection_creates_change(state, resolved)?
+    };
+    let output_amounts = if resolved.output_amounts.is_empty() {
+        vec![resolved.amount_sats]
+    } else {
+        resolved.output_amounts.clone()
+    };
+    Ok(PegoutPreview {
+        amount_sats: resolved.amount_sats,
+        fee_sats: resolved.fee_sats,
+        dust_sats,
+        creates_change,
+        output_count: output_amounts.len() as u32,
+        output_amounts,
+        fee_output_index: resolved.fee_output_index,
     })
 }
 
@@ -1753,36 +2045,64 @@ fn resolve_pegout_request(
         .as_ref()
         .ok_or_else(|| WalletError::Mweb("MWEB runtime not initialized".into()))?;
     let tip = state.wallet.latest_checkpoint().height();
-    let spendable = mweb::spendable_mweb_sats(mweb, tip);
-    let net = state.network.to_bitcoin_network();
-    let dest = Address::from_str(&req.address)
-        .map_err(|e| WalletError::InvalidAddress(e.to_string()))?
-        .require_network(net)
-        .map_err(|e| WalletError::InvalidAddress(e.to_string()))?;
-    let dust_relay = FeeRate::from_sat_per_vb(30)
-        .ok_or_else(|| WalletError::BuildTx("internal dust fee rate".into()))?;
-    let dust_sats = dest
-        .script_pubkey()
-        .minimal_non_dust_custom(dust_relay)
-        .to_sat();
-
-    let amount_sats = if req.drain {
-        let amount = spendable.checked_sub(fee_sats).ok_or_else(|| {
-            WalletError::BuildTx(format!(
-                "not enough private funds to peg out after a {} litoshis MWEB fee",
-                fee_sats
-            ))
-        })?;
-        if amount < dust_sats {
-            return Err(WalletError::BuildTx(format!(
-                "peg-out all would create a {} litoshis output below the {} litoshis dust limit",
-                amount, dust_sats
-            )));
-        }
-        amount
+    let frozen = mweb_frozen::read_ids(&state.data_dir)?.ids;
+    let selected = mweb::normalize_selected_ids(req.selected_output_ids.as_deref());
+    let per_coin = req.drain || selected.is_some();
+    let dust_sats = if !per_coin && !req.address.trim().is_empty() {
+        let net = state.network.to_bitcoin_network();
+        let dest = Address::from_str(&req.address)
+            .map_err(|e| WalletError::InvalidAddress(e.to_string()))?
+            .require_network(net)
+            .map_err(|e| WalletError::InvalidAddress(e.to_string()))?;
+        let dust_relay = FeeRate::from_sat_per_vb(30)
+            .ok_or_else(|| WalletError::BuildTx("internal dust fee rate".into()))?;
+        dest.script_pubkey()
+            .minimal_non_dust_custom(dust_relay)
+            .to_sat()
     } else {
-        req.amount_sats
+        mweb::p2wpkh_dust_sats()?
     };
+
+    if per_coin {
+        let coins = if let Some(ref ids) = selected {
+            mweb::resolve_spend_coins(
+                mweb.store.db(),
+                tip,
+                &frozen,
+                Some(ids.as_slice()),
+                0,
+                "swapping",
+            )?
+        } else {
+            mweb::spendable_pool(mweb.store.db(), tip, &frozen)
+        };
+        if coins.is_empty() {
+            return Err(WalletError::BuildTx(
+                "no spendable private coins to peg out".into(),
+            ));
+        }
+        let coin_amounts: Vec<u64> = coins.iter().map(|c| c.amount).collect();
+        let plan = mweb::plan_pegout_per_coin(&coin_amounts, fee_sats, dust_sats)?;
+        let amount_sats = plan.amounts.iter().copied().sum();
+        let ids: Vec<String> = coins.iter().map(|c| hex::encode(c.output_id)).collect();
+        return Ok((
+            PegoutRequest {
+                address: String::new(),
+                amount_sats,
+                fee_sats,
+                drain: true,
+                selected_output_ids: Some(ids),
+                output_amounts: plan.amounts,
+                addresses: Vec::new(),
+                per_coin: true,
+                fee_output_index: Some(plan.fee_output_index as u32),
+            },
+            dust_sats,
+        ));
+    }
+
+    let spendable = mweb::spendable_mweb_sats(mweb, tip, &frozen);
+    let amount_sats = req.amount_sats;
     if amount_sats < dust_sats {
         return Err(WalletError::BuildTx(format!(
             "peg-out amount {} litoshis is below the dust limit ({} litoshis for this address)",
@@ -1802,6 +2122,11 @@ fn resolve_pegout_request(
             amount_sats,
             fee_sats,
             drain: false,
+            selected_output_ids: selected,
+            output_amounts: vec![amount_sats],
+            addresses: Vec::new(),
+            per_coin: false,
+            fee_output_index: None,
         },
         dust_sats,
     ))
@@ -1913,6 +2238,140 @@ fn parse_outpoint(raw: &str) -> Result<OutPoint, WalletError> {
     })
 }
 
+fn public_split_utxo(
+    state: &WalletState,
+    raw: &str,
+) -> Result<(OutPoint, u64), WalletError> {
+    let op = parse_outpoint(raw)?;
+    let utxo = state.wallet.get_utxo(op).ok_or_else(|| {
+        WalletError::BuildTx(format!(
+            "selected outpoint {op} is not an unspent output in this wallet"
+        ))
+    })?;
+    if state.wallet.is_outpoint_locked(op) {
+        return Err(WalletError::BuildTx(format!(
+            "selected outpoint {op} is frozen — unfreeze it before splitting"
+        )));
+    }
+    let tip = state.wallet.local_chain().tip().height();
+    let confirmations = match utxo.chain_position {
+        ChainPosition::Confirmed { anchor, .. } => {
+            tip.saturating_sub(anchor.block_id.height).saturating_add(1)
+        }
+        ChainPosition::Unconfirmed { .. } => 0,
+    };
+    if confirmations == 0 {
+        return Err(WalletError::BuildTx(
+            "Split is disabled until the coin is confirmed".into(),
+        ));
+    }
+    Ok((op, utxo.txout.value.to_sat()))
+}
+
+fn plan_split_request(state: &mut WalletState, req: &SplitRequest) -> Result<SplitPreview, WalletError> {
+    match req.chain {
+        SplitChain::Public => {
+            let (_op, input_sats) = public_split_utxo(state, &req.input)?;
+            let fee_rate_sat_vb = match req.fee_rate_sat_vb {
+                Some(rate) if rate > 0 => rate,
+                _ => {
+                    let client = connect_electrum(state)?;
+                    electrum::estimate_fee_rate_sat_vb(&client)?.0
+                }
+            };
+            split::plan_split(&PlanParams {
+                input_sats,
+                equal_count: req.equal_count,
+                amounts: req.amounts.clone(),
+                fee_sats: req.fee_sats,
+                fee_rate_sat_vb,
+                public: true,
+                mweb_fee: DEFAULT_MWEB_FEE_SATS,
+            })
+        }
+        SplitChain::Private => {
+            let mweb = state.mweb.as_ref().ok_or_else(|| {
+                WalletError::Mweb("MWEB runtime not initialized".into())
+            })?;
+            let tip = state.wallet.latest_checkpoint().height();
+            let frozen = mweb_frozen::read_ids(&state.data_dir)?.ids;
+            let coin = mweb::select_split_coin(mweb.store.db(), &req.input, tip, &frozen)?;
+            split::plan_split(&PlanParams {
+                input_sats: coin.amount,
+                equal_count: req.equal_count,
+                amounts: req.amounts.clone(),
+                fee_sats: req.fee_sats,
+                fee_rate_sat_vb: 0,
+                public: false,
+                mweb_fee: auto_mweb_fee(req.fee_sats),
+            })
+        }
+    }
+}
+
+/// Build a 1-in-N-out PSBT. Reveals N receive addresses and persists before return.
+fn build_public_split_psbt(
+    state: &mut WalletState,
+    input: &str,
+    preview: &SplitPreview,
+) -> Result<(Psbt, u64), WalletError> {
+    let (op, _input_sats) = public_split_utxo(state, input)?;
+    let dust_relay = FeeRate::from_sat_per_vb(30)
+        .ok_or_else(|| WalletError::BuildTx("internal dust fee rate".into()))?;
+
+    let recipients: Vec<(ScriptBuf, Amount)> = preview
+        .outputs
+        .iter()
+        .filter(|o| !o.is_change)
+        .map(|o| {
+            let addr = state.wallet.reveal_next_address(KeychainKind::External);
+            let script = addr.script_pubkey();
+            let min_non_dust = script.minimal_non_dust_custom(dust_relay);
+            let amount = Amount::from_sat(o.amount_sats);
+            if amount < min_non_dust {
+                return Err(WalletError::BuildTx(format!(
+                    "Output of {} litoshis is below the network dust limit ({} litoshis).",
+                    o.amount_sats,
+                    min_non_dust.to_sat()
+                )));
+            }
+            Ok((script, amount))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    state
+        .wallet
+        .persist(&mut state.db)
+        .map_err(|e| WalletError::Persist(e.to_string()))?;
+
+    let mut tx_builder = state.wallet.build_tx();
+    tx_builder
+        .add_utxos(&[op])
+        .map_err(|e| WalletError::BuildTx(e.to_string()))?;
+    tx_builder.manually_selected_only();
+    for (script, amount) in recipients {
+        tx_builder.add_recipient(script, amount);
+    }
+    tx_builder.fee_absolute(Amount::from_sat(preview.fee_sats));
+    let psbt = tx_builder.finish().map_err(|e| WalletError::BuildTx(e.to_string()))?;
+    if psbt.unsigned_tx.input.len() != 1 {
+        return Err(WalletError::BuildTx(
+            "Split uses exactly one coin".into(),
+        ));
+    }
+    let fee_sats = psbt
+        .fee_amount()
+        .ok_or_else(|| WalletError::BuildTx("unable to compute fee".into()))?
+        .to_sat();
+    if fee_sats != preview.fee_sats {
+        return Err(WalletError::BuildTx(format!(
+            "built fee ({fee_sats} litoshis) does not match preview ({} litoshis)",
+            preview.fee_sats
+        )));
+    }
+    Ok((psbt, fee_sats))
+}
+
 /// Manual peg-in coin selection leaves transparent change when inputs exceed amount+fee.
 fn pegin_selection_creates_change(
     state: &WalletState,
@@ -1932,6 +2391,46 @@ fn pegin_selection_creates_change(
         }
     }
     sum > total_from_transparent_sats
+}
+
+fn mweb_selection_creates_change(
+    state: &WalletState,
+    req: &MwebSendRequest,
+) -> Result<bool, WalletError> {
+    mweb_inputs_exceed_needed(state, req.selected_output_ids.as_deref(), req.amount_sats, req.fee_sats, "spending")
+}
+
+fn pegout_selection_creates_change(
+    state: &WalletState,
+    req: &PegoutRequest,
+) -> Result<bool, WalletError> {
+    mweb_inputs_exceed_needed(state, req.selected_output_ids.as_deref(), req.amount_sats, req.fee_sats, "swapping")
+}
+
+fn mweb_inputs_exceed_needed(
+    state: &WalletState,
+    selected: Option<&[String]>,
+    amount_sats: u64,
+    fee_sats: u64,
+    action: &str,
+) -> Result<bool, WalletError> {
+    let mweb = state
+        .mweb
+        .as_ref()
+        .ok_or_else(|| WalletError::Mweb("MWEB runtime not initialized".into()))?;
+    let tip = state.wallet.latest_checkpoint().height();
+    let frozen = mweb_frozen::read_ids(&state.data_dir)?.ids;
+    let needed = amount_sats.saturating_add(fee_sats);
+    let coins = mweb::resolve_spend_coins(
+        mweb.store.db(),
+        tip,
+        &frozen,
+        selected,
+        needed,
+        action,
+    )?;
+    let sum: u64 = coins.iter().map(|c| c.amount).sum();
+    Ok(sum > needed)
 }
 
 fn collect_unspent(state: &WalletState) -> Vec<UtxoRecord> {

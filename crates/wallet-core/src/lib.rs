@@ -22,6 +22,9 @@ mod network;
 mod rpc;
 mod secrets;
 mod seed;
+mod split;
+mod split_ids;
+mod mweb_frozen;
 mod utxo_labels;
 
 pub use app::{MemoryBackedApp, WalletApp};
@@ -30,12 +33,13 @@ pub use dto::{
     AddressReuseHint, CombinedSummary, ContactKind, ContactRecord, CreateWalletRequest,
     CreateWalletResponse, DeleteContactRequest, ElectrumProbe, FeeEstimate, FeeLadder,
     MetricSeries, MigrateEncryptRequest, MwebBroadcastResult, MwebScheme, MwebSendPreview,
-    MwebSendRequest, MwebSyncProgress, NetworkPulse, PeginPreview, PeginRequest, PeginResult,
-    PegoutPreview, PegoutRequest, RestoreWalletRequest, RevealMnemonicRequest,
+    MwebSendRequest, MwebSyncProgress, MwebUtxoRecord, NetworkPulse, PeginPreview, PeginRequest,
+    PeginResult, PegoutPreview, PegoutRequest, RestoreWalletRequest, RevealMnemonicRequest,
     RevealMnemonicResponse, SendPreview, SendRequest, SendResult, SetTxLabelRequest,
-    SetUtxoLabelRequest, SetUtxoLockedRequest, SyncResult, TxEnrichment, TxIo, TxKind, TxRecord,
-    TxStatus, UnlockRequest, UpdateSettingsRequest, UpsertContactRequest,
-    UtxoRecord, WalletSettings, WalletSummary, DEFAULT_MWEB_FEE_SATS,
+    SetUtxoLabelRequest, SetMwebUtxoLockedRequest, SetUtxoLockedRequest, SplitChain, SplitOutput,
+    SplitPreview, SplitRequest, SplitResult, SyncResult, TxEnrichment, TxIo, TxKind, TxRecord,
+    TxStatus, UnlockRequest, UpdateSettingsRequest, UpsertContactRequest, UtxoRecord,
+    WalletSettings, WalletSummary, DEFAULT_MWEB_FEE_SATS,
 };
 pub use explorer::{DEFAULT_EXPLORER_BASE_URL, is_chain_txid};
 pub use error::{BroadcastFailureKind, WalletError};
