@@ -340,6 +340,22 @@
           </button>
           <button
             type="button"
+            id="nav-litvm"
+            class="nav-item"
+            role="tab"
+            aria-controls="view-litvm"
+            aria-selected="false"
+            hidden
+          >
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16v10H4z" />
+              <path d="M8 12h8" />
+              <circle cx="12" cy="12" r="1.2" />
+            </svg>
+            <span class="nav-label">LitVM</span>
+          </button>
+          <button
+            type="button"
             id="nav-settings"
             class="nav-item"
             role="tab"
@@ -1032,6 +1048,85 @@
             </div>
           </section>
 
+          <section id="view-litvm" class="view" role="tabpanel" aria-labelledby="nav-litvm" hidden>
+            <div class="banner banner-info litvm-banner">
+              <p>
+                <strong>LiteForge testnet.</strong> zkLTC here is not L1 Litecoin. Faucet funds have
+                no mainnet value. This account is derived from the same recovery phrase
+                (<code>m/44'/60'/0'/0/0</code>).
+              </p>
+              <button type="button" id="btn-litvm-faucet" class="btn btn-ghost btn-sm">
+                Open faucet
+              </button>
+            </div>
+            <div class="card">
+              <div class="sheet-head">
+                <h3>zkLTC</h3>
+                <button type="button" id="btn-litvm-refresh" class="btn btn-ghost btn-sm">Refresh</button>
+              </div>
+              <p class="balance-total" id="litvm-balance">0 zkLTC</p>
+              <p class="hint" id="litvm-status">Not connected</p>
+            </div>
+            <div class="card">
+              <h3>Receive</h3>
+              <canvas id="litvm-qr" class="qr" width="180" height="180" aria-label="LitVM receive QR"></canvas>
+              <p class="mono address" id="litvm-address">—</p>
+              <div class="row">
+                <button type="button" id="btn-copy-litvm" class="btn btn-secondary">Copy address</button>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Send</h3>
+              <form id="litvm-send-form">
+                <label class="field">
+                  <span class="field-label">LitVM address</span>
+                  <input
+                    id="litvm-send-address"
+                    class="mono"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="0x…"
+                  />
+                </label>
+                <p class="hint" id="litvm-send-address-hint" hidden></p>
+                <label class="field">
+                  <span class="field-label">Amount (zkLTC)</span>
+                  <input id="litvm-send-amount" type="text" inputmode="decimal" placeholder="0.0" />
+                </label>
+                <div class="row">
+                  <button type="submit" id="btn-litvm-send" class="btn btn-primary">Send zkLTC</button>
+                </div>
+              </form>
+            </div>
+            <div class="card">
+              <div class="sheet-head">
+                <h3>Activity</h3>
+                <button type="button" id="btn-litvm-history-refresh" class="btn btn-ghost btn-sm">
+                  Refresh
+                </button>
+              </div>
+              <ul id="litvm-tx-list" class="tx-list"></ul>
+              <p class="hint" id="litvm-tx-empty">No LitVM transactions yet, or the explorer index is unavailable.</p>
+            </div>
+            <div class="card">
+              <h3>RPC</h3>
+              <label class="field">
+                <span class="field-label">HTTP RPC (blank = LiteForge default)</span>
+                <input id="litvm-rpc" class="mono" type="text" spellcheck="false" placeholder="https://…" />
+              </label>
+              <div class="row">
+                <button type="button" id="btn-test-litvm-rpc" class="btn btn-ghost btn-sm">
+                  Test connection
+                </button>
+                <button type="button" id="btn-save-litvm-rpc" class="btn btn-secondary btn-sm">
+                  Save RPC
+                </button>
+                <span class="hint" id="litvm-rpc-result"></span>
+              </div>
+            </div>
+          </section>
+
           <section id="view-history" class="view" role="tabpanel" aria-labelledby="nav-history" hidden>
             <div class="card">
               <div class="sheet-head">
@@ -1232,6 +1327,10 @@
                   <strong>Explorer (litview)</strong> — learns your IP when fetching spot price, fee
                   hints, or Insights pulse/charts; IP and a specific txid when you open transaction
                   details or click “View on litview”. Wallet address lists are never uploaded.
+                </li>
+                <li>
+                  <strong>LitVM RPC</strong> — the Caldera (or custom) HTTP endpoint learns your IP
+                  and your LitVM <code>0x</code> address when you open the LitVM tab or send zkLTC.
                 </li>
                 <li>
                   <strong>On disk</strong> — transparent wallet metadata in sqlite is plaintext.

@@ -20,6 +20,7 @@ Paste or `@`-reference this file when starting a new Cursor chat in this repo.
 - **Secrets:** Argon2id + ChaCha20-Poly1305 `wallet.mnemonic.enc` (legacy plaintext migrated on unlock). Mode `0600`. Never store mnemonic in SQLite.
 - **Concurrency:** Electrum/BDK/MWEB calls are blocking → `spawn_blocking` + `Mutex<WalletState>`.
 - **UX:** No optimistic balance after send — sync, then refresh. Amounts in LTC (string decimal → litoshis). Dust floor ~2940 litoshis for `ltc1`. Auto-sync every 60s (status-line errors only).
+- **LitVM:** Sidecar crate `wallet-litvm` (alloy), same seed `m/44'/60'/0'/0/0`, LiteForge presets in `litvm.json`. Testnet-only until official mainnet params. See [`docs/LITVM.md`](LITVM.md).
 
 ## Default endpoints
 
@@ -83,6 +84,7 @@ Boot → Unlock | Migrate | Onboarding → Mnemonic backup → verify quiz → H
 9. UX P2 payment polish (units, BIP21, fee clarity, receive feedback)
 10. UX P3 privacy hardening (hide balance, reuse warn, disclosure, labels)
 11. UX P4 shippable (history search/export, contacts, Public coin control)
+12. LitVM Phase 0–2 ([`LITVM.md`](LITVM.md)): `wallet-litvm` crate, LiteForge receive/send, history, custom RPC. Grail / mainnet not started.
 
 ## Litview / LRK / Insights
 
@@ -93,3 +95,4 @@ matrix: [`docs/LITVIEW.md`](LITVIEW.md). Deep links + enrichment/price/fees + In
 ## Out of scope (still)
 
 Multi-peer UTXO-omission detection, embedded litecoind, hardware wallets, fine-window sync in UI, universal binary.
+Grail peg, WalletConnect, ERC-20, x402.

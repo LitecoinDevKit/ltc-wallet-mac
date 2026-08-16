@@ -185,6 +185,18 @@ impl WalletApp {
         self.secrets.is_locked()
     }
 
+    /// 32-byte secp256k1 secret for LitVM (`m/44'/60'/0'/0/0`). Requires unlock.
+    /// Caller must zeroize after use. Never log this value.
+    pub fn litvm_account_secret(&self) -> Result<[u8; 32], WalletError> {
+        self.ensure_unlocked()?;
+        let stored = self
+            .secrets
+            .get_mnemonic()?
+            .ok_or(WalletError::MissingMnemonic)?;
+        let secret = MasterSecret::from_stored(&stored)?;
+        secret.litvm_account_secret()
+    }
+
     pub fn needs_migration(&self) -> bool {
         self.secrets.needs_migration()
     }

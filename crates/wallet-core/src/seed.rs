@@ -7,7 +7,7 @@
 
 use bdk_mweb::keys::{MasterKeyScheme, MasterKeys};
 use bdk_wallet::bitcoin::base58;
-use bdk_wallet::bitcoin::bip32::Xpriv;
+use bdk_wallet::bitcoin::bip32::{DerivationPath, Xpriv};
 use bdk_wallet::bitcoin::key::Secp256k1;
 use bdk_wallet::bitcoin::{Network, NetworkKind};
 use bdk_wallet::keys::bip39::{Language, Mnemonic};
@@ -158,6 +158,24 @@ impl MasterSecret {
             Self::Aezeed { .. } => "aezeed seed",
             Self::Xprv(_) => "extended private key",
         }
+    }
+
+    /// secp256k1 secret for the LitVM sidecar account (`m/44'/60'/0'/0/0`).
+    ///
+    /// Same path MetaMask/Rabby use. Network version bytes on the master xprv
+    /// do not change the derived 32-byte key.
+    pub fn litvm_account_secret(&self) -> Result<[u8; 32], WalletError> {
+        let master = self.master_xprv(Network::Bitcoin)?;
+        let secp = Secp256k1::new();
+        let path: DerivationPath = "m/44'/60'/0'/0/0"
+            .parse()
+            .map_err(|e: bdk_wallet::bitcoin::bip32::Error| {
+                WalletError::Descriptor(e.to_string())
+            })?;
+        let child = master
+            .derive_priv(&secp, &path)
+            .map_err(|e| WalletError::Descriptor(e.to_string()))?;
+        Ok(child.private_key.secret_bytes())
     }
 
     /// Backup material without storage tags: phrase/key plus optional aezeed cipher passphrase.
@@ -365,6 +383,21 @@ mod tests {
         let mut data = base58::decode_check(key).unwrap();
         data[0..4].copy_from_slice(&version);
         base58::encode_check(&data)
+    }
+
+    #[test]
+    fn litvm_path_matches_anvil_account0() {
+        // Hardhat/Anvil default mnemonic, MetaMask account 0.
+        let secret = MasterSecret::parse(
+            "test test test test test test test test test test test junk",
+            None,
+        )
+        .unwrap();
+        let got = secret.litvm_account_secret().unwrap();
+        let expected =
+            hex::decode("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+                .unwrap();
+        assert_eq!(got.as_slice(), expected.as_slice());
     }
 
     #[test]

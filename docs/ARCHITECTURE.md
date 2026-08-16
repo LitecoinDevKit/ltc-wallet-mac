@@ -18,8 +18,10 @@ ltc-wallet-mac/
   docs/
     CHAT_HANDOFF.md       # short decisions for new Cursor chats
     ARCHITECTURE.md       # this file
+    LITVM.md              # LitVM sidecar plan
   crates/wallet-core/     # BDK boundary + DTOs + encrypted secrets + MWEB
-  src-tauri/              # Tauri app (commands → wallet-core)
+  crates/wallet-litvm/    # alloy EVM sidecar (LiteForge); no BDK types
+  src-tauri/              # Tauri app (commands → wallet-core + wallet-litvm)
   ui/                     # Frontend (receive / balance / send / settings)
 ```
 
@@ -170,6 +172,14 @@ Default testnet fee rate for early builds: `1` sat/vB (matches BDK Electrum E2E)
 - Do not index HogAddr / peg-in bridge outs as transparent UTXOs
 
 Ops reference: sibling `bdk/docs/MWEB_PEER_OPS.md`, `LITECOIN_E2E.md` (`mainnet_mweb`).
+
+## LitVM sidecar
+
+Separate crate `wallet-litvm` (alloy), feature `litvm` (default on) in
+`src-tauri` / `wallet-cli`. Network presets (`LitVmNetwork`) — LiteForge now,
+mainnet as a second row — signing chain ID is the preset, not the RPC response.
+No BDK / EVM type mixing; Tauri still sees serde string DTOs only. Full plan:
+[`LITVM.md`](LITVM.md).
 
 ## Security notes (MVP)
 

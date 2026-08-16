@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/wallet-core", "crates/wallet-cli", "src-tauri"]
+members = ["crates/wallet-core", "crates/wallet-cli", "crates/wallet-litvm", "src-tauri"]
 
 [workspace.package]
 edition = "2021"

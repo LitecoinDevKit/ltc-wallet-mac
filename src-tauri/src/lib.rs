@@ -16,13 +16,15 @@ use wallet_core::{
     WalletSummary,
 };
 
-fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+mod litvm;
+
+pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
-fn map_err(err: wallet_core::WalletError) -> String {
+pub(crate) fn map_err(err: wallet_core::WalletError) -> String {
     err.to_string()
 }
 
@@ -62,9 +64,15 @@ async fn unlock_wallet(
 }
 
 #[tauri::command]
-async fn lock_wallet(state: State<'_, Arc<WalletApp>>) -> Result<(), String> {
+async fn lock_wallet(
+    app: AppHandle,
+    state: State<'_, Arc<WalletApp>>,
+) -> Result<(), String> {
     let wallet = Arc::clone(&state);
     wallet.lock();
+    #[cfg(feature = "litvm")]
+    litvm::drop_from_app(&app);
+    let _ = app;
     Ok(())
 }
 
@@ -99,11 +107,18 @@ async fn create_wallet(
 ) -> Result<CreateWalletResponse, String> {
     let dir = data_dir(&app)?;
     let wallet = Arc::clone(&state);
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         wallet.create(&dir, req, &passphrase).map_err(map_err)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if result.is_ok() {
+        #[cfg(feature = "litvm")]
+        {
+            let _ = litvm::attach_from_app(&app, &state);
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -115,11 +130,18 @@ async fn restore_wallet(
 ) -> Result<WalletSummary, String> {
     let dir = data_dir(&app)?;
     let wallet = Arc::clone(&state);
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         wallet.restore(&dir, req, &passphrase).map_err(map_err)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if result.is_ok() {
+        #[cfg(feature = "litvm")]
+        {
+            let _ = litvm::attach_from_app(&app, &state);
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -129,9 +151,16 @@ async fn load_wallet(
 ) -> Result<WalletSummary, String> {
     let dir = data_dir(&app)?;
     let wallet = Arc::clone(&state);
-    tauri::async_runtime::spawn_blocking(move || wallet.load(&dir).map_err(map_err))
+    let result = tauri::async_runtime::spawn_blocking(move || wallet.load(&dir).map_err(map_err))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    if result.is_ok() {
+        #[cfg(feature = "litvm")]
+        {
+            let _ = litvm::attach_from_app(&app, &state);
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -684,6 +713,11 @@ async fn fetch_insight_charts(
 /// Phrase the user must type before a wipe is executed. Checked here at the
 /// IPC boundary (not only in the UI) so a scripted or compromised webview
 /// cannot destroy the wallet with a bare `invoke("wipe_wallet")`.
+#[tauri::command]
+fn litvm_available() -> bool {
+    cfg!(feature = "litvm")
+}
+
 const WIPE_CONFIRMATION_PHRASE: &str = "DELETE WALLET";
 
 #[tauri::command]
@@ -699,6 +733,11 @@ async fn wipe_wallet(
     }
     let dir = data_dir(&app)?;
     let wallet = Arc::clone(&state);
+    #[cfg(feature = "litvm")]
+    {
+        litvm::drop_from_app(&app);
+        litvm::wipe_sidecar(&dir);
+    }
     tauri::async_runtime::spawn_blocking(move || wallet.wipe(&dir).map_err(map_err))
         .await
         .map_err(|e| e.to_string())?
@@ -711,6 +750,8 @@ pub fn run() {
             let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&dir)?;
             app.manage(Arc::new(WalletApp::new(&dir)));
+            #[cfg(feature = "litvm")]
+            app.manage(Arc::new(litvm::LitVmHandle::new()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -771,6 +812,16 @@ pub fn run() {
             fetch_network_pulse,
             fetch_insight_charts,
             wipe_wallet,
+            litvm_available,
+            litvm::litvm_summary,
+            litvm::test_litvm_rpc,
+            litvm::preview_litvm_send,
+            litvm::send_litvm,
+            litvm::replace_litvm_tx,
+            litvm::litvm_history,
+            litvm::get_litvm_settings,
+            litvm::update_litvm_settings,
+            litvm::litvm_explorer_tx_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

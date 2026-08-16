@@ -14,9 +14,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = ["litvm"]
+litvm = ["dep:wallet-litvm"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rfd = "0.15"
 wallet-core = { path = "../crates/wallet-core" }
+wallet-litvm = { path = "../crates/wallet-litvm", optional = true }

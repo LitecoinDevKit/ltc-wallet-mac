@@ -1376,6 +1376,17 @@ textarea {
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 
+.litvm-banner {
+  margin: 0 0 0.85rem;
+}
+
+#litvm-qr {
+  display: block;
+  margin: 0.5rem 0 0.75rem;
+  border-radius: 8px;
+  background: #fff;
+}
+
 .banner p {
   margin: 0;
   color: var(--text-2);

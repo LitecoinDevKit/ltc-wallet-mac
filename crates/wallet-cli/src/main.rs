@@ -133,6 +133,20 @@ enum Command {
         #[arg(long)]
         aezeed_passphrase: Option<String>,
     },
+    /// Print the LitVM (LiteForge) 0x address derived from this wallet.
+    #[cfg(feature = "litvm")]
+    LitvmAddress,
+    /// Probe LiteForge RPC and print zkLTC balance JSON.
+    #[cfg(feature = "litvm")]
+    LitvmBalance,
+    /// Send native zkLTC on LiteForge.
+    #[cfg(feature = "litvm")]
+    LitvmSend {
+        #[arg(long)]
+        address: String,
+        #[arg(long)]
+        amount: String,
+    },
 }
 
 fn read_passphrase(explicit: &Option<String>) -> Result<String> {
@@ -287,9 +301,41 @@ fn main() -> Result<()> {
             .context("derive preview")?;
             println!("{}", serde_json::to_string_pretty(&preview)?);
         }
+        #[cfg(feature = "litvm")]
+        Command::LitvmAddress => {
+            ensure_loaded(&app, &data_dir, &passphrase_opt)?;
+            let mut client = open_litvm(&app, &data_dir)?;
+            println!("{}", client.address());
+            let _ = client.probe();
+        }
+        #[cfg(feature = "litvm")]
+        Command::LitvmBalance => {
+            ensure_loaded(&app, &data_dir, &passphrase_opt)?;
+            let mut client = open_litvm(&app, &data_dir)?;
+            println!("{}", serde_json::to_string_pretty(&client.summary()?)?);
+        }
+        #[cfg(feature = "litvm")]
+        Command::LitvmSend { address, amount } => {
+            ensure_loaded(&app, &data_dir, &passphrase_opt)?;
+            let mut client = open_litvm(&app, &data_dir)?;
+            let _ = client.probe();
+            let result = client.send(&wallet_litvm::LitVmSendRequest {
+                address,
+                amount_zkltc: amount,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
     }
 
     Ok(())
+}
+
+#[cfg(feature = "litvm")]
+fn open_litvm(app: &WalletApp, data_dir: &Path) -> Result<wallet_litvm::LitVmClient> {
+    let secret = app
+        .litvm_account_secret()
+        .context("derive LitVM account")?;
+    wallet_litvm::LitVmClient::open(data_dir, secret).context("open LitVM client")
 }
 
 fn write_coinswapd_env(path: &Path, scan: &str, spend: &str, dest: &str) -> Result<()> {
