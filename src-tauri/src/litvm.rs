@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 use wallet_core::WalletApp;
 use wallet_litvm::{
-    wipe_settings_file, LitVmClient, LitVmHistoryTx, LitVmProbe, LitVmReplaceRequest,
-    LitVmSendPreview, LitVmSendRequest, LitVmSendResult, LitVmSettings, LitVmSummary,
-    UpdateLitVmSettingsRequest,
+    parse_evm_address, wipe_settings_file, LitVmClient, LitVmHistoryPage, LitVmProbe,
+    LitVmReplaceRequest, LitVmSendPreview, LitVmSendRequest, LitVmSendResult, LitVmSettings,
+    LitVmSummary, UpdateLitVmSettingsRequest,
 };
 
 use crate::{data_dir, map_err};
@@ -114,11 +114,18 @@ pub async fn replace_litvm_tx(
 #[tauri::command]
 pub async fn litvm_history(
     handle: State<'_, Arc<LitVmHandle>>,
-) -> Result<Vec<LitVmHistoryTx>, String> {
+) -> Result<LitVmHistoryPage, String> {
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || with_client(&handle, |c| c.history()))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn validate_litvm_address(address: String) -> Result<String, String> {
+    parse_evm_address(&address)
+        .map(|addr| addr.to_checksum(None))
+        .map_err(map_litvm)
 }
 
 #[tauri::command]

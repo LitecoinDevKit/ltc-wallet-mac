@@ -23,6 +23,12 @@ pub enum LitVmError {
     #[error("fee from RPC exceeds the safety cap ({0})")]
     FeeCap(String),
 
+    #[error("{0}")]
+    FeeCongested(String),
+
+    #[error("that LitVM transaction already confirmed — no need to speed it up")]
+    AlreadyConfirmed,
+
     #[error("settings error: {0}")]
     Settings(String),
 

@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Mutex;
+use std::time::Duration;
 
+use alloy::consensus::Transaction as _;
 use alloy::network::{EthereumWallet, TransactionBuilder};
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, TxHash, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
@@ -11,17 +15,19 @@ use zeroize::Zeroize;
 use crate::address::{format_address, parse_evm_address};
 use crate::amount::{format_zkltc, parse_zkltc};
 use crate::dto::{
-    LitVmHistoryTx, LitVmProbe, LitVmReplaceRequest, LitVmSendPreview, LitVmSendRequest,
-    LitVmSendResult, LitVmSummary, UpdateLitVmSettingsRequest,
+    LitVmHistoryPage, LitVmHistoryTx, LitVmProbe, LitVmReplaceRequest, LitVmSendPreview,
+    LitVmSendRequest, LitVmSendResult, LitVmSummary, UpdateLitVmSettingsRequest,
 };
-use crate::network::LitVmSettings;
 use crate::error::LitVmError;
+use crate::fees::{bump_eip1559, cap_max_fee_gwei, cap_priority_gwei, check_total_fee};
 use crate::history::fetch_txlist;
 use crate::network::{
-    LitVmNetwork, LitVmSettingsFile, GAS_PAD_BPS, MAX_FEE_GWEI, MAX_GAS_LIMIT, MAX_PRIORITY_GWEI,
+    LitVmNetwork, LitVmSettings, LitVmSettingsFile, GAS_PAD_BPS, MAX_GAS_LIMIT,
 };
 use crate::settings::{load_settings_file, save_settings_file};
 
+const RECEIPT_POLL_MS: u64 = 250;
+const RECEIPT_POLL_ATTEMPTS: u32 = 8; // ~2s
 
 pub struct LitVmClient {
     runtime: tokio::runtime::Runtime,
@@ -32,6 +38,7 @@ pub struct LitVmClient {
     rpc_http: String,
     rpc_override: Option<String>,
     signing_enabled: bool,
+    local_pending: Mutex<Vec<LitVmHistoryTx>>,
 }
 
 impl LitVmClient {
@@ -41,8 +48,7 @@ impl LitVmClient {
             .build()
             .map_err(|e| LitVmError::Rpc(e.to_string()))?;
         let file = load_settings_file(data_dir)?;
-        let settings = LitVmSettings::from_file(&file, false)
-            .map_err(LitVmError::Settings)?;
+        let settings = LitVmSettings::from_file(&file, false).map_err(LitVmError::Settings)?;
         let signer = PrivateKeySigner::from_slice(&secret)
             .map_err(|e| LitVmError::Rpc(e.to_string()))?
             .with_chain_id(Some(settings.network.chain_id));
@@ -57,6 +63,7 @@ impl LitVmClient {
             rpc_override: settings.rpc_http_override,
             network: settings.network,
             signing_enabled: false,
+            local_pending: Mutex::new(Vec::new()),
         })
     }
 
@@ -162,7 +169,9 @@ impl LitVmClient {
         let to = parse_evm_address(&req.address)?;
         let value = parse_zkltc(&req.amount_zkltc)?;
         if value.is_zero() {
-            return Err(LitVmError::InvalidAmount("amount must be greater than 0".into()));
+            return Err(LitVmError::InvalidAmount(
+                "amount must be greater than 0".into(),
+            ));
         }
         let built = self.runtime.block_on(self.build_tx(to, value, None))?;
         Ok(LitVmSendPreview {
@@ -181,33 +190,73 @@ impl LitVmClient {
         let to = parse_evm_address(&req.address)?;
         let value = parse_zkltc(&req.amount_zkltc)?;
         if value.is_zero() {
-            return Err(LitVmError::InvalidAmount("amount must be greater than 0".into()));
+            return Err(LitVmError::InvalidAmount(
+                "amount must be greater than 0".into(),
+            ));
         }
         let built = self.runtime.block_on(self.build_tx(to, value, None))?;
         let txid = self.runtime.block_on(self.broadcast(built.request))?;
+        let pending = !self.runtime.block_on(self.wait_for_receipt(&txid))?;
+        if pending {
+            self.push_local_pending(LitVmHistoryTx {
+                txid: txid.clone(),
+                from: self.address(),
+                to: format_address(to),
+                amount_zkltc: format_zkltc(value),
+                incoming: false,
+                pending: true,
+                failed: false,
+                nonce: built.nonce,
+                timestamp: None,
+            });
+        }
         Ok(LitVmSendResult {
             txid,
             fee_zkltc: format_zkltc(built.fee),
+            pending,
         })
     }
 
     pub fn replace_tx(&self, req: &LitVmReplaceRequest) -> Result<LitVmSendResult, LitVmError> {
         self.ensure_signing()?;
-        let to = parse_evm_address(&req.address)?;
-        let value = parse_zkltc(&req.amount_zkltc)?;
-        let built = self
-            .runtime
-            .block_on(self.build_tx(to, value, Some(req.nonce)))?;
-        let bumped = self.runtime.block_on(self.bump_fees(built))?;
-        let txid = self.runtime.block_on(self.broadcast(bumped.request))?;
-        Ok(LitVmSendResult {
-            txid,
-            fee_zkltc: format_zkltc(bumped.fee),
-        })
+        let result = self.runtime.block_on(self.replace_tx_async(req));
+        match &result {
+            Ok(sent) => {
+                self.drop_local_pending(&req.txid);
+                if sent.pending {
+                    self.push_local_pending(LitVmHistoryTx {
+                        txid: sent.txid.clone(),
+                        from: self.address(),
+                        to: req.address.clone(),
+                        amount_zkltc: req.amount_zkltc.clone(),
+                        incoming: false,
+                        pending: true,
+                        failed: false,
+                        nonce: req.nonce,
+                        timestamp: None,
+                    });
+                }
+            }
+            Err(LitVmError::AlreadyConfirmed) => self.drop_local_pending(&req.txid),
+            Err(_) => {}
+        }
+        result
     }
 
-    pub fn history(&self) -> Result<Vec<LitVmHistoryTx>, LitVmError> {
-        fetch_txlist(&self.network, &self.address())
+    pub fn history(&self) -> Result<LitVmHistoryPage, LitVmError> {
+        let mut page = fetch_txlist(&self.network, &self.address())?;
+        let indexed: std::collections::HashSet<String> = page
+            .txs
+            .iter()
+            .map(|t| t.txid.to_ascii_lowercase())
+            .collect();
+        if let Ok(mut local) = self.local_pending.lock() {
+            local.retain(|t| !indexed.contains(&t.txid.to_ascii_lowercase()));
+            for tx in local.iter().rev() {
+                page.txs.insert(0, tx.clone());
+            }
+        }
+        Ok(page)
     }
 
     fn ensure_signing(&self) -> Result<(), LitVmError> {
@@ -228,13 +277,12 @@ impl LitVmClient {
 
     fn rpc_chain_id(&self) -> Result<u64, LitVmError> {
         let provider = self.provider()?;
-        self.runtime
-            .block_on(async move {
-                provider
-                    .get_chain_id()
-                    .await
-                    .map_err(|e| LitVmError::Rpc(e.to_string()))
-            })
+        self.runtime.block_on(async move {
+            provider
+                .get_chain_id()
+                .await
+                .map_err(|e| LitVmError::Rpc(e.to_string()))
+        })
     }
 
     fn balance_wei(&self) -> Result<U256, LitVmError> {
@@ -245,6 +293,109 @@ impl LitVmClient {
                 .get_balance(addr)
                 .await
                 .map_err(|e| LitVmError::Rpc(e.to_string()))
+        })
+    }
+
+    fn push_local_pending(&self, tx: LitVmHistoryTx) {
+        if let Ok(mut local) = self.local_pending.lock() {
+            local.retain(|t| t.txid.to_ascii_lowercase() != tx.txid.to_ascii_lowercase());
+            local.push(tx);
+        }
+    }
+
+    fn drop_local_pending(&self, txid: &str) {
+        let needle = txid.to_ascii_lowercase();
+        if let Ok(mut local) = self.local_pending.lock() {
+            local.retain(|t| t.txid.to_ascii_lowercase() != needle);
+        }
+    }
+
+    async fn wait_for_receipt(&self, txid: &str) -> Result<bool, LitVmError> {
+        let hash = parse_tx_hash(txid)?;
+        let provider = self.provider()?;
+        for _ in 0..RECEIPT_POLL_ATTEMPTS {
+            if provider
+                .get_transaction_receipt(hash)
+                .await
+                .map_err(|e| LitVmError::Rpc(e.to_string()))?
+                .is_some()
+            {
+                return Ok(true);
+            }
+            tokio::time::sleep(Duration::from_millis(RECEIPT_POLL_MS)).await;
+        }
+        Ok(false)
+    }
+
+    async fn replace_tx_async(
+        &self,
+        req: &LitVmReplaceRequest,
+    ) -> Result<LitVmSendResult, LitVmError> {
+        let hash = parse_tx_hash(&req.txid)?;
+        let provider = self.provider()?;
+        if provider
+            .get_transaction_receipt(hash)
+            .await
+            .map_err(|e| LitVmError::Rpc(e.to_string()))?
+            .is_some()
+        {
+            return Err(LitVmError::AlreadyConfirmed);
+        }
+        let original = provider
+            .get_transaction_by_hash(hash)
+            .await
+            .map_err(|e| LitVmError::Rpc(e.to_string()))?
+            .ok_or_else(|| {
+                LitVmError::Rpc(
+                    "pending transaction not found — it may have dropped from the mempool".into(),
+                )
+            })?;
+
+        let nonce = original.nonce();
+        let to = original
+            .to()
+            .ok_or_else(|| LitVmError::Rpc("cannot replace a contract-creation tx".into()))?;
+        let value = original.value();
+        let gas_limit = if original.gas_limit() == 0 {
+            21_000
+        } else {
+            original.gas_limit()
+        };
+
+        let old_max = original.max_fee_per_gas();
+        let old_tip = original.priority_fee_or_price();
+
+        let market = provider
+            .estimate_eip1559_fees()
+            .await
+            .map_err(|e| LitVmError::Rpc(e.to_string()))?;
+        let max_priority = cap_priority_gwei(bump_eip1559(
+            old_tip,
+            market.max_priority_fee_per_gas,
+        ))?;
+        let max_fee = cap_max_fee_gwei(bump_eip1559(old_max, market.max_fee_per_gas))?;
+        if max_fee < max_priority {
+            return Err(LitVmError::FeeCap(
+                "bumped max fee is below the priority fee".into(),
+            ));
+        }
+        let total = check_total_fee(gas_limit, max_fee)?;
+
+        let request = TransactionRequest::default()
+            .with_from(self.address)
+            .with_to(to)
+            .with_value(value)
+            .with_nonce(nonce)
+            .with_chain_id(self.network.chain_id)
+            .with_gas_limit(gas_limit)
+            .with_max_fee_per_gas(max_fee)
+            .with_max_priority_fee_per_gas(max_priority);
+        let txid = self.broadcast(request).await?;
+        let pending = !self.wait_for_receipt(&txid).await?;
+        Ok(LitVmSendResult {
+            txid,
+            fee_zkltc: format_zkltc(U256::from(total)),
+            pending,
         })
     }
 
@@ -266,8 +417,8 @@ impl LitVmClient {
             .estimate_eip1559_fees()
             .await
             .map_err(|e| LitVmError::Rpc(e.to_string()))?;
-        let max_priority = cap_gwei(fees.max_priority_fee_per_gas, MAX_PRIORITY_GWEI)?;
-        let max_fee = cap_gwei(fees.max_fee_per_gas, MAX_FEE_GWEI)?;
+        let max_priority = cap_priority_gwei(fees.max_priority_fee_per_gas)?;
+        let max_fee = cap_max_fee_gwei(fees.max_fee_per_gas)?;
         if max_fee < max_priority {
             return Err(LitVmError::FeeCap(
                 "max fee is below the priority fee".into(),
@@ -293,34 +444,16 @@ impl LitVmClient {
         if gas_limit == 0 {
             return Err(LitVmError::Rpc("gas estimate was 0".into()));
         }
+        let total = check_total_fee(gas_limit, max_fee)?;
         let request = draft.with_gas_limit(gas_limit);
-        let fee = U256::from(gas_limit).saturating_mul(U256::from(max_fee));
-        let max_fee_total = fee;
+        let fee = U256::from(total);
         Ok(BuiltTx {
             request,
             nonce,
             gas_limit,
             fee,
-            max_fee: max_fee_total,
+            max_fee: fee,
         })
-    }
-
-    async fn bump_fees(&self, mut built: BuiltTx) -> Result<BuiltTx, LitVmError> {
-        let max_fee = built
-            .request
-            .max_fee_per_gas
-            .ok_or_else(|| LitVmError::Rpc("missing max fee".into()))?;
-        let tip = built
-            .request
-            .max_priority_fee_per_gas
-            .ok_or_else(|| LitVmError::Rpc("missing priority fee".into()))?;
-        let new_tip = cap_gwei(tip.saturating_mul(2), MAX_PRIORITY_GWEI)?;
-        let new_max = cap_gwei(max_fee.saturating_mul(2), MAX_FEE_GWEI)?;
-        built.request.max_priority_fee_per_gas = Some(new_tip);
-        built.request.max_fee_per_gas = Some(new_max);
-        built.fee = U256::from(built.gas_limit).saturating_mul(U256::from(new_max));
-        built.max_fee = built.fee;
-        Ok(built)
     }
 
     async fn broadcast(&self, request: TransactionRequest) -> Result<String, LitVmError> {
@@ -346,12 +479,6 @@ struct BuiltTx {
     max_fee: U256,
 }
 
-fn cap_gwei(value: u128, cap_gwei: u128) -> Result<u128, LitVmError> {
-    let cap = cap_gwei.saturating_mul(1_000_000_000);
-    if value > cap {
-        return Err(LitVmError::FeeCap(format!(
-            "{value} wei/gas > {cap_gwei} gwei cap"
-        )));
-    }
-    Ok(value)
+fn parse_tx_hash(txid: &str) -> Result<TxHash, LitVmError> {
+    TxHash::from_str(txid.trim()).map_err(|e| LitVmError::Rpc(format!("invalid txid: {e}")))
 }

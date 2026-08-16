@@ -5,14 +5,16 @@ mod amount;
 mod client;
 mod dto;
 mod error;
+mod fees;
 mod history;
 mod network;
 mod settings;
 
+pub use address::{looks_like_evm_address, parse_evm_address};
 pub use client::LitVmClient;
 pub use dto::{
-    LitVmHistoryTx, LitVmProbe, LitVmReplaceRequest, LitVmSendPreview, LitVmSendRequest,
-    LitVmSendResult, LitVmSummary, UpdateLitVmSettingsRequest,
+    LitVmHistoryPage, LitVmHistoryTx, LitVmProbe, LitVmReplaceRequest, LitVmSendPreview,
+    LitVmSendRequest, LitVmSendResult, LitVmSummary, UpdateLitVmSettingsRequest,
 };
 pub use network::LitVmSettings;
 pub use error::LitVmError;

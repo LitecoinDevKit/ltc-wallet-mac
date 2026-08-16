@@ -6,9 +6,12 @@ pub const LITEFORGE_EXPLORER: &str = "https://liteforge.explorer.caldera.xyz";
 pub const LITEFORGE_FAUCET: &str = "https://testnet.litvm.com";
 pub const SETTINGS_FILE: &str = "litvm.json";
 
-/// Hard caps so a hostile RPC cannot drain via gas. Orbit fees are far below this.
-pub const MAX_FEE_GWEI: u128 = 1_000;
-pub const MAX_PRIORITY_GWEI: u128 = 50;
+/// Per-gas headroom for Orbit's L2 + L1-calldata fee. Honest L1 spikes can
+/// push the synthesized L2 gas price well above a few gwei.
+pub const MAX_FEE_GWEI: u128 = 10_000;
+pub const MAX_PRIORITY_GWEI: u128 = 500;
+/// Drain brake: `gas_limit * max_fee_per_gas` must stay under 0.05 zkLTC.
+pub const MAX_TOTAL_FEE_WEI: u128 = 50_000_000_000_000_000;
 pub const MAX_GAS_LIMIT: u64 = 2_000_000;
 pub const GAS_PAD_BPS: u64 = 2_000; // +20%
 

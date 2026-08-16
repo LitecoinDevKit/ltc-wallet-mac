@@ -93,6 +93,7 @@ type LitVmSendPreview = {
 type LitVmSendResult = {
   txid: string;
   fee_zkltc: string;
+  pending: boolean;
 };
 
 type LitVmHistoryTx = {
@@ -102,8 +103,14 @@ type LitVmHistoryTx = {
   amount_zkltc: string;
   incoming: boolean;
   pending: boolean;
+  failed: boolean;
   nonce: number;
   timestamp: number | null;
+};
+
+type LitVmHistoryPage = {
+  txs: LitVmHistoryTx[];
+  warning: string | null;
 };
 
 type LitVmSettings = {
@@ -740,6 +747,7 @@ let insightsEnabled = true;
 let litvmEnabled = false;
 let litvmFaucetUrl = "https://testnet.litvm.com";
 let litvmHistory: LitVmHistoryTx[] = [];
+let litvmHistoryWarning: string | null = null;
 let lastLitvmSummary: LitVmSummary | null = null;
 let explorerBaseUrl = "https://litview.space";
 let spotPriceUsd: number | null = null;
@@ -1956,13 +1964,23 @@ function appendParagraph(host: HTMLElement, text: string, className: string) {
   host.appendChild(p);
 }
 
-function isEvmAddress(address: string): boolean {
+/** Shape only — routes L1 vs LitVM. Mixed-case checksum is enforced on LitVM send. */
+function looksLikeEvmAddress(address: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(address.trim());
+}
+
+function isMixedCaseEvmAddress(address: string): boolean {
+  const hex = address.trim().replace(/^0x/i, "");
+  return /[a-f]/.test(hex) && /[A-F]/.test(hex);
+}
+
+async function validateLitvmAddress(address: string): Promise<string> {
+  return invoke<string>("validate_litvm_address", { address });
 }
 
 function addressNetworkBadge(address: string): string {
   const a = address.trim().toLowerCase();
-  if (isEvmAddress(address)) return "LitVM · 0x";
+  if (looksLikeEvmAddress(address)) return "LitVM · 0x";
   if (a.startsWith("ltcmweb1") || a.startsWith("tmweb1")) return "Private · ltcmweb1";
   if (a.startsWith("ltc1") || a.startsWith("tltc1")) return "Public · ltc1";
   return "Address";
@@ -3731,7 +3749,7 @@ async function contactEditorFlow(existing: ContactRecord | null) {
     setStatus("Name and address are required.", "error");
     return;
   }
-  if (isEvmAddress(address)) {
+  if (looksLikeEvmAddress(address)) {
     setStatus("That is a LitVM 0x address. Use the LitVM tab to send zkLTC.", "error");
     return;
   }
@@ -5940,7 +5958,20 @@ function updateLitvmAddressHint() {
     el.litvmSendAddressHint.hidden = true;
     return;
   }
-  if (isEvmAddress(value)) {
+  if (looksLikeEvmAddress(value)) {
+    if (isMixedCaseEvmAddress(value)) {
+      void validateLitvmAddress(value)
+        .then(() => {
+          if (el.litvmSendAddress.value.trim() !== value) return;
+          el.litvmSendAddressHint.hidden = true;
+        })
+        .catch((e) => {
+          if (el.litvmSendAddress.value.trim() !== value) return;
+          el.litvmSendAddressHint.hidden = false;
+          el.litvmSendAddressHint.textContent = String(e);
+        });
+      return;
+    }
     el.litvmSendAddressHint.hidden = true;
     return;
   }
@@ -5986,22 +6017,30 @@ async function refreshLitvm() {
 async function refreshLitvmHistory() {
   if (!litvmEnabled) return;
   try {
-    litvmHistory = await invoke<LitVmHistoryTx[]>("litvm_history");
+    const page = await invoke<LitVmHistoryPage>("litvm_history");
+    litvmHistory = page.txs;
+    litvmHistoryWarning = page.warning;
     renderLitvmHistory();
   } catch (e) {
     litvmHistory = [];
+    litvmHistoryWarning = String(e);
     renderLitvmHistory();
-    el.litvmTxEmpty.hidden = false;
-    el.litvmTxEmpty.textContent = String(e);
   }
 }
 
 function renderLitvmHistory() {
   el.litvmTxList.textContent = "";
-  el.litvmTxEmpty.hidden = litvmHistory.length > 0;
-  if (!litvmHistory.length && !el.litvmTxEmpty.textContent) {
-    el.litvmTxEmpty.textContent =
-      "No LitVM transactions yet, or the explorer index is unavailable.";
+  const empty = litvmHistory.length === 0;
+  el.litvmTxEmpty.hidden = !empty && !litvmHistoryWarning;
+  if (empty && litvmHistoryWarning) {
+    el.litvmTxEmpty.hidden = false;
+    el.litvmTxEmpty.textContent = litvmHistoryWarning;
+  } else if (empty) {
+    el.litvmTxEmpty.hidden = false;
+    el.litvmTxEmpty.textContent = "No LitVM transactions yet.";
+  } else if (litvmHistoryWarning) {
+    el.litvmTxEmpty.hidden = false;
+    el.litvmTxEmpty.textContent = litvmHistoryWarning;
   }
   for (const tx of litvmHistory) {
     const li = document.createElement("li");
@@ -6009,10 +6048,12 @@ function renderLitvmHistory() {
     const main = document.createElement("div");
     main.className = "tx-main";
     const title = document.createElement("div");
-    title.textContent = `${tx.incoming ? "Received" : "Sent"} ${formatZkltcDisplay(tx.amount_zkltc)}`;
+    const kind = tx.incoming ? "Received" : "Sent";
+    title.textContent = `${kind} ${formatZkltcDisplay(tx.amount_zkltc)}`;
     const meta = document.createElement("div");
     meta.className = "hint";
-    meta.textContent = `${tx.txid.slice(0, 10)}…${tx.pending ? " · pending" : ""}`;
+    const state = tx.failed ? " · failed" : tx.pending ? " · pending" : "";
+    meta.textContent = `${tx.txid.slice(0, 10)}…${state}`;
     main.append(title, meta);
     const actions = document.createElement("div");
     actions.className = "row";
@@ -6025,7 +6066,7 @@ function renderLitvmHistory() {
       void openLitvmExplorer(tx.txid);
     });
     actions.append(explore);
-    if (tx.pending && !tx.incoming) {
+    if (tx.pending && !tx.failed && !tx.incoming) {
       const speed = document.createElement("button");
       speed.type = "button";
       speed.className = "btn btn-ghost btn-sm";
@@ -6053,7 +6094,8 @@ async function openLitvmExplorer(txid: string) {
 async function replaceLitvmTx(tx: LitVmHistoryTx) {
   const confirmed = await openConfirm({
     title: "Speed up LitVM payment",
-    message: "Broadcast a replacement with the same nonce and a higher fee.",
+    message:
+      "LiteForge usually confirms in a fraction of a second. A lingering pending tx usually means the first fee was too low or the RPC dropped it — not a normal sequencer wait. This replacement uses the same nonce and at least 12.5% higher fees than the pending tx.",
     destination: tx.to,
     rows: [
       ["Amount", `${tx.amount_zkltc} zkLTC`],
@@ -6072,7 +6114,12 @@ async function replaceLitvmTx(tx: LitVmHistoryTx) {
         amount_zkltc: tx.amount_zkltc,
       },
     });
-    setStatus(`Replacement broadcast: ${result.txid.slice(0, 10)}…`, "success");
+    setStatus(
+      result.pending
+        ? `Replacement still pending: ${result.txid.slice(0, 10)}…`
+        : `Replacement confirmed: ${result.txid.slice(0, 10)}…`,
+      "success",
+    );
     await refreshLitvm();
   } catch (e) {
     setError(String(e));
@@ -6121,8 +6168,14 @@ el.litvmSendForm.addEventListener("submit", async (event) => {
   if (sending) return;
   const address = el.litvmSendAddress.value.trim();
   const amount = el.litvmSendAmount.value.trim();
-  if (!isEvmAddress(address)) {
+  if (!looksLikeEvmAddress(address)) {
     setError("Enter a 0x LitVM address. Litecoin addresses belong on Send.");
+    return;
+  }
+  try {
+    await validateLitvmAddress(address);
+  } catch (e) {
+    setError(String(e));
     return;
   }
   if (!amount) {
@@ -6170,7 +6223,12 @@ el.litvmSendForm.addEventListener("submit", async (event) => {
     });
     el.litvmSendAddress.value = "";
     el.litvmSendAmount.value = "";
-    setStatus(`Sent zkLTC · ${result.txid.slice(0, 10)}…`, "success");
+    setStatus(
+      result.pending
+        ? `Broadcast zkLTC · ${result.txid.slice(0, 10)}… (waiting on explorer index)`
+        : `Sent zkLTC · ${result.txid.slice(0, 10)}…`,
+      "success",
+    );
     await refreshLitvm();
   } catch (e) {
     setError(String(e));
@@ -6197,7 +6255,7 @@ el.sendForm.addEventListener("submit", async (event) => {
     );
     return;
   }
-  if (isEvmAddress(address)) {
+  if (looksLikeEvmAddress(address)) {
     setError("That is a LitVM address. Switch to the LitVM tab to send zkLTC.");
     return;
   }

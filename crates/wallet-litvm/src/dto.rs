@@ -45,6 +45,13 @@ pub struct LitVmSendPreview {
 pub struct LitVmSendResult {
     pub txid: String,
     pub fee_zkltc: String,
+    /// False when a receipt arrived within the post-broadcast poll.
+    #[serde(default = "default_true")]
+    pub pending: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,8 +70,17 @@ pub struct LitVmHistoryTx {
     pub amount_zkltc: String,
     pub incoming: bool,
     pub pending: bool,
+    #[serde(default)]
+    pub failed: bool,
     pub nonce: u64,
     pub timestamp: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LitVmHistoryPage {
+    pub txs: Vec<LitVmHistoryTx>,
+    /// Set when Blockscout is down; `txs` may still include a local pending overlay.
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

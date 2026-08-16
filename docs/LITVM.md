@@ -14,7 +14,8 @@ Last verified: 2026-08-15. Live probe: `eth_chainId` on
 `https://liteforge.rpc.caldera.xyz/http` returned `0x1159` (4441). Explorer
 `https://liteforge.explorer.caldera.xyz` returned HTTP 200. WebSocket still
 unconfirmed. Blockscout `account/balance` works; `txlist` may be flaky — the
-wallet treats an indexer miss as empty history plus “open explorer”.
+wallet treats an indexer miss as empty history plus “open explorer”, and
+overlays a just-sent tx locally until the indexer lists it.
 
 ## Locked decisions
 
@@ -30,6 +31,18 @@ wallet treats an indexer miss as empty history plus “open explorer”.
 - zkLTC never enters the hero LTC balance or MWEB / Public coin-control
   selectors.
 - UI is vanilla TS in `ui/src/main.ts` (not React).
+- History is Blockscout `txlist` only. Native zkLTC transfers between EOAs do
+  not emit logs, so `eth_getLogs` is blind to them. `txreceipt_status == "0"`
+  is failed, not pending.
+- Two-layer fee cap: per-gas headroom (`MAX_FEE_GWEI = 10_000`) for Orbit’s
+  L2 + L1-calldata spike, plus a **total** drain brake
+  (`gas_limit * max_fee_per_gas ≤ 0.05 zkLTC`). Congestion vs hostile-RPC
+  errors are distinct.
+- Same-nonce speed-up loads the in-mempool tx and bumps both EIP-1559 fields
+  by at least 12.5% (`ceil(old * 1125 / 1000)`), then `max` with a fresh
+  estimate. A receipt means “already confirmed”.
+- Mixed-case `0x` addresses are EIP-55 checksummed. All-lower / all-upper
+  are accepted without a checksum.
 - Grail peg-in/out is out of scope until an official lock-script spec or
   Rust/WASM SDK exists. Do not reverse-engineer deposit UTXOs.
 
@@ -74,7 +87,7 @@ optional user RPC override.
 | --- | --- | --- |
 | **0 Boundaries** | Done | `wallet-litvm` crate, feature flag, DTOs, derive `0x` from mnemonic. |
 | **1 LiteForge read/write** | Done (probed `0x1159`) | Balance, receive QR, native send, fee cap, `0x` vs `ltc1` guard, persistent testnet banner. |
-| **2 Polish on testnet** | Done | History API, custom RPC, stuck-tx / same-nonce replace. Not blocked on mainnet. |
+| **2 Polish on testnet** | Done | History API, custom RPC, stuck-tx / same-nonce replace (12.5% over the pending tx). Not blocked on mainnet. |
 | **3 Mainnet enable** | Official chain ID + RPC + explorer published **and** live probe matches | Add preset, default new installs to mainnet, keep LiteForge as advanced. |
 | **4 Grail** | Official lock-script spec or Rust/WASM SDK | In-app L1 ↔ zkLTC peg. Separate project. |
 

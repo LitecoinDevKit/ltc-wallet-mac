@@ -819,6 +819,7 @@ pub fn run() {
             litvm::send_litvm,
             litvm::replace_litvm_tx,
             litvm::litvm_history,
+            litvm::validate_litvm_address,
             litvm::get_litvm_settings,
             litvm::update_litvm_settings,
             litvm::litvm_explorer_tx_url,
