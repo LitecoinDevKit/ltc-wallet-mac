@@ -13,6 +13,7 @@ Paste or `@`-reference this file when starting a new Cursor chat in this repo.
   - `../bdk` (`LitecoinDevKit/bdk`, branch `litecoin`)
   - nested `../bdk/bdk_wallet`
   - `../rust-litecoin` via workspace `[patch]`
+  - `../grail-sdk-rust` (unofficial Grail client; LiteForge only; path-dep from `wallet-cli`)
 - **Alias rule:** Cargo `bitcoin` → `litecoin` crate.
   - Litecoin **mainnet** = `Network::Bitcoin`, BIP84 coin type **`2`**
   - Litecoin **testnet** = `Network::Testnet4`, coin type **`1`**
@@ -21,6 +22,7 @@ Paste or `@`-reference this file when starting a new Cursor chat in this repo.
 - **Concurrency:** Electrum/BDK/MWEB calls are blocking → `spawn_blocking` + `Mutex<WalletState>`.
 - **UX:** No optimistic balance after send — sync, then refresh. Amounts in LTC (string decimal → litoshis). Dust floor ~2940 litoshis for `ltc1`. Auto-sync every 60s (status-line errors only).
 - **LitVM:** Sidecar crate `wallet-litvm` (alloy), same seed `m/44'/60'/0'/0/0`, LiteForge presets in `litvm.json`. Testnet-only until official mainnet params. See [`docs/LITVM.md`](LITVM.md).
+- **Grail:** Sibling `grail-sdk-rust` — verify-before-fund, no invented leaf. `wallet-cli grail-verify --offer`. `grail-deposit` stubbed until a captured offer verifies. No Tauri UI. No mainnet.
 
 ## Default endpoints
 
@@ -84,7 +86,7 @@ Boot → Unlock | Migrate | Onboarding → Mnemonic backup → verify quiz → H
 9. UX P2 payment polish (units, BIP21, fee clarity, receive feedback)
 10. UX P3 privacy hardening (hide balance, reuse warn, disclosure, labels)
 11. UX P4 shippable (history search/export, contacts, Public coin control)
-12. LitVM Phase 0–2 ([`LITVM.md`](LITVM.md)): `wallet-litvm` crate, LiteForge receive/send, history, custom RPC. Grail / mainnet not started.
+12. LitVM Phase 0–2 ([`LITVM.md`](LITVM.md)): `wallet-litvm` crate, LiteForge receive/send, history, custom RPC. Grail: unofficial sibling SDK + CLI verify; in-app peg / mainnet not started.
 
 ## Litview / LRK / Insights
 
@@ -95,4 +97,4 @@ matrix: [`docs/LITVIEW.md`](LITVIEW.md). Deep links + enrichment/price/fees + In
 ## Out of scope (still)
 
 Multi-peer UTXO-omission detection, embedded litecoind, hardware wallets, fine-window sync in UI, universal binary.
-Grail peg, WalletConnect, ERC-20, x402.
+Grail in-app / mainnet peg, WalletConnect, ERC-20, x402.

@@ -147,6 +147,26 @@ enum Command {
         #[arg(long)]
         amount: String,
     },
+    /// Offline-verify a Grail deposit offer JSON (LiteForge / testnet only).
+    #[cfg(feature = "litvm")]
+    GrailVerify {
+        #[arg(long)]
+        offer: PathBuf,
+    },
+    /// Verify then pay a Grail deposit (stubbed until a captured offer verifies).
+    #[cfg(feature = "litvm")]
+    GrailDeposit {
+        /// Captured initiate/confirm JSON. Required until GRAIL_API_URL exists.
+        #[arg(long)]
+        offer: Option<PathBuf>,
+        #[arg(long)]
+        amount_sats: Option<u64>,
+        #[arg(long, default_value_t = 1)]
+        fee_rate: u64,
+        /// Funding outpoints (`txid:vout`). Repeatable.
+        #[arg(long)]
+        outpoint: Vec<String>,
+    },
 }
 
 fn read_passphrase(explicit: &Option<String>) -> Result<String> {
@@ -168,8 +188,7 @@ fn read_passphrase(explicit: &Option<String>) -> Result<String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_dir = cli.data_dir.clone();
-    std::fs::create_dir_all(&data_dir)
-        .with_context(|| format!("create {}", data_dir.display()))?;
+    std::fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
     let app = WalletApp::new(&data_dir);
     let passphrase_opt = cli.passphrase.clone();
 
@@ -325,6 +344,22 @@ fn main() -> Result<()> {
             })?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        #[cfg(feature = "litvm")]
+        Command::GrailVerify { offer } => {
+            let verified = grail_verify_file(&offer)?;
+            println!("{}", serde_json::to_string_pretty(&verified)?);
+        }
+        #[cfg(feature = "litvm")]
+        Command::GrailDeposit {
+            offer,
+            amount_sats,
+            fee_rate,
+            outpoint,
+        } => {
+            ensure_loaded(&app, &data_dir, &passphrase_opt)?;
+            let result = grail_deposit(&app, &data_dir, offer, amount_sats, fee_rate, outpoint)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
     }
 
     Ok(())
@@ -332,10 +367,95 @@ fn main() -> Result<()> {
 
 #[cfg(feature = "litvm")]
 fn open_litvm(app: &WalletApp, data_dir: &Path) -> Result<wallet_litvm::LitVmClient> {
-    let secret = app
-        .litvm_account_secret()
-        .context("derive LitVM account")?;
+    let secret = app.litvm_account_secret().context("derive LitVM account")?;
     wallet_litvm::LitVmClient::open(data_dir, secret).context("open LitVM client")
+}
+
+#[cfg(feature = "litvm")]
+fn grail_verify_file(path: &Path) -> Result<grail::VerifiedDeposit> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let (request, offer) = grail::load_offer_json(&bytes).context("parse offer JSON")?;
+    grail::verify_deposit_offer(&offer, &request).context("verify deposit offer")
+}
+
+#[cfg(feature = "litvm")]
+fn grail_deposit(
+    app: &WalletApp,
+    data_dir: &Path,
+    offer_path: Option<PathBuf>,
+    amount_sats: Option<u64>,
+    fee_rate: u64,
+    outpoints: Vec<String>,
+) -> Result<wallet_core::SendResult> {
+    let summary = app.summary().context("summary")?;
+    if summary.network != WalletNetwork::Testnet {
+        bail!("grail-deposit is LiteForge / Litecoin testnet only");
+    }
+    let litvm = open_litvm(app, data_dir)?;
+    let dest = litvm.address();
+
+    let (request, offer) = if let Some(path) = offer_path {
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let (mut request, offer) = grail::load_offer_json(&bytes).context("parse offer JSON")?;
+        request.dest = dest;
+        if !outpoints.is_empty() {
+            request.funding_outpoints = outpoints;
+        }
+        if let Some(sats) = amount_sats {
+            request.amount_sats = sats;
+        }
+        (request, offer)
+    } else {
+        let sats = amount_sats.ok_or_else(|| {
+            anyhow::anyhow!("--amount-sats required when initiating without --offer")
+        })?;
+        if outpoints.is_empty() {
+            bail!("--outpoint required when initiating without --offer");
+        }
+        let request = grail::InitiateRequest {
+            funding_outpoints: outpoints,
+            amount_sats: sats,
+            dest,
+            chain_id: grail::LITEFORGE_CHAIN_ID,
+        };
+        let client = grail::GrailClient::from_env();
+        let offer = match client.initiate(&request) {
+            Ok(o) => o,
+            Err(grail::GrailError::EndpointUnknown) => {
+                bail!(
+                    "Grail initiate API is not published yet. Capture an offer \
+                     (see ../grail-sdk-rust/docs/CAPTURE.md) and pass --offer. \
+                     Set GRAIL_API_URL when the endpoint exists."
+                );
+            }
+            Err(e) => return Err(e).context("grail initiate"),
+        };
+        (request, offer)
+    };
+
+    let verified = match grail::verify_deposit_offer(&offer, &request) {
+        Ok(v) => v,
+        Err(grail::GrailError::UnverifiedTree) => {
+            bail!(
+                "offer has no tap merkle root; cannot pay until a captured \
+                 LiteForge offer verifies (see ../grail-sdk-rust/docs/CAPTURE.md)"
+            );
+        }
+        Err(e) => return Err(e).context("verify deposit offer"),
+    };
+    let address = grail_bdk::pay_to(&verified);
+    app.send(SendRequest {
+        address,
+        amount_sats: verified.amount_sats,
+        fee_rate_sat_vb: Some(fee_rate),
+        drain: false,
+        selected_outpoints: if verified.funding_outpoints.is_empty() {
+            None
+        } else {
+            Some(verified.funding_outpoints.clone())
+        },
+    })
+    .context("send to verified Grail address")
 }
 
 fn write_coinswapd_env(path: &Path, scan: &str, spend: &str, dest: &str) -> Result<()> {
@@ -353,8 +473,8 @@ fn write_coinswapd_env(path: &Path, scan: &str, spend: &str, dest: &str) -> Resu
     }
     let mut lines: Vec<String> = Vec::new();
     if path.exists() {
-        let existing = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let existing =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         for line in existing.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("MWEB_SCAN_SECRET=")
@@ -383,11 +503,7 @@ fn write_coinswapd_env(path: &Path, scan: &str, spend: &str, dest: &str) -> Resu
     Ok(())
 }
 
-fn ensure_loaded(
-    app: &WalletApp,
-    data_dir: &Path,
-    passphrase_opt: &Option<String>,
-) -> Result<()> {
+fn ensure_loaded(app: &WalletApp, data_dir: &Path, passphrase_opt: &Option<String>) -> Result<()> {
     if !app.exists(data_dir) {
         bail!("no wallet at {}", data_dir.display());
     }
@@ -397,8 +513,7 @@ fn ensure_loaded(
             .context("migrate encrypt")?;
     } else if app.is_locked() {
         let passphrase = read_passphrase(passphrase_opt)?;
-        app.unlock(UnlockRequest { passphrase })
-            .context("unlock")?;
+        app.unlock(UnlockRequest { passphrase }).context("unlock")?;
     }
     app.load(data_dir).context("load wallet")?;
     Ok(())

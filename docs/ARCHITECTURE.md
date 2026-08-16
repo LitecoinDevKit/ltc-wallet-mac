@@ -31,6 +31,7 @@ Sibling checkouts (expected on a dev machine):
 /Users/indigo/Dev/bdk
 /Users/indigo/Dev/bdk_wallet
 /Users/indigo/Dev/ltc-wallet-mac   ← this repo
+/Users/indigo/Dev/grail-sdk-rust   unofficial Grail client (LiteForge only)
 ```
 
 ## Layering
@@ -178,8 +179,9 @@ Ops reference: sibling `bdk/docs/MWEB_PEER_OPS.md`, `LITECOIN_E2E.md` (`mainnet_
 Separate crate `wallet-litvm` (alloy), feature `litvm` (default on) in
 `src-tauri` / `wallet-cli`. Network presets (`LitVmNetwork`) — LiteForge now,
 mainnet as a second row — signing chain ID is the preset, not the RPC response.
-No BDK / EVM type mixing; Tauri still sees serde string DTOs only. Full plan:
-[`LITVM.md`](LITVM.md).
+No BDK / EVM type mixing; Tauri still sees serde string DTOs only. Grail lives
+in sibling `grail-sdk-rust` (`wallet-cli grail-verify` / stubbed `grail-deposit`);
+not in `wallet-core` or the Tauri UI. Full plan: [`LITVM.md`](LITVM.md).
 
 ## Security notes (MVP)
 

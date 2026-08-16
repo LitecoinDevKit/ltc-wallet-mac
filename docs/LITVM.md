@@ -8,7 +8,7 @@ Official docs: [docs.litvm.com](https://docs.litvm.com/). Testnet hub:
 
 ## Status
 
-**Phase 2 (LiteForge read/write + history + custom RPC) · mainnet TBA · Grail not ready**
+**Phase 2 (LiteForge read/write + history + custom RPC) · mainnet TBA · Grail SDK sibling started (unofficial)**
 
 Last verified: 2026-08-15. Live probe: `eth_chainId` on
 `https://liteforge.rpc.caldera.xyz/http` returned `0x1159` (4441). Explorer
@@ -43,8 +43,10 @@ overlays a just-sent tx locally until the indexer lists it.
   estimate. A receipt means “already confirmed”.
 - Mixed-case `0x` addresses are EIP-55 checksummed. All-lower / all-upper
   are accepted without a checksum.
-- Grail peg-in/out is out of scope until an official lock-script spec or
-  Rust/WASM SDK exists. Do not reverse-engineer deposit UTXOs.
+- Grail in-app peg is still gated on an official lock-script spec and operator
+  MuSig2 params. Unofficial sibling `../grail-sdk-rust` implements
+  verify-before-fund only (LiteForge). Do not invent a TapTree leaf. Do not
+  pay an offer that returns `UnverifiedTree`. No mainnet.
 
 ## Network is data
 
@@ -89,7 +91,7 @@ optional user RPC override.
 | **1 LiteForge read/write** | Done (probed `0x1159`) | Balance, receive QR, native send, fee cap, `0x` vs `ltc1` guard, persistent testnet banner. |
 | **2 Polish on testnet** | Done | History API, custom RPC, stuck-tx / same-nonce replace (12.5% over the pending tx). Not blocked on mainnet. |
 | **3 Mainnet enable** | Official chain ID + RPC + explorer published **and** live probe matches | Add preset, default new installs to mainnet, keep LiteForge as advanced. |
-| **4 Grail** | Official lock-script spec or Rust/WASM SDK | In-app L1 ↔ zkLTC peg. Separate project. |
+| **4 Grail** | Official lock-script spec + operator params; captured LiteForge offer verifies | Sibling `grail-sdk-rust` + `wallet-cli grail-verify` / stubbed `grail-deposit`. No Tauri UI yet. |
 
 ### Mainnet enable checklist
 
@@ -120,7 +122,7 @@ Point the user at the other network instead of constructing a tx.
 ## Non-goals
 
 WalletConnect, dapp browser, ERC-20 / USDC, x402 / agent payments, MetaMask
-embedding, Grail reverse-engineering, merging LitVM into MWEB coin control.
+embedding, inventing a Grail TapTree leaf, merging LitVM into MWEB coin control.
 
 ## E2E (LiteForge)
 
@@ -137,7 +139,7 @@ embedding, Grail reverse-engineering, merging LitVM into MWEB coin control.
 | --- | --- |
 | WebSocket `wss://liteforge.rpc.caldera.xyz/ws` | Subscribe vs HTTP poll + rate limits |
 | Public RPC rate limits | Backoff in the HTTP transport |
-| Grail SDK / lock-script spec | Phase 4 gate |
+| Grail SDK / lock-script spec | Sibling `grail-sdk-rust` started; leaf still unknown — capture initiate/confirm JSON (`../grail-sdk-rust/docs/CAPTURE.md`) |
 | L1 deposit address format (P2TR vs P2WPKH) | Whether BIP84 is enough for a later peg |
 
 ## Refresh

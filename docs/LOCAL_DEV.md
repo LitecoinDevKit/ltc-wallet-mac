@@ -12,7 +12,8 @@ Dev/
 ├── ltc-wallet-mac/   this repo
 ├── bdk/              LitecoinDevKit/bdk        (litecoin)
 ├── bdk_wallet/       LitecoinDevKit/bdk_wallet (litecoin)
-└── rust-litecoin/    LitecoinDevKit/rust-litecoin
+├── rust-litecoin/    LitecoinDevKit/rust-litecoin
+└── grail-sdk-rust/   unofficial Grail client (path-dep from wallet-cli)
 ```
 
 Then add a gitignored `.cargo/config.toml` at this repo's root:
