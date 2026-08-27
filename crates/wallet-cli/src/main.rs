@@ -148,13 +148,13 @@ enum Command {
         amount: String,
     },
     /// Offline-verify a Grail deposit offer JSON (LiteForge / testnet only).
-    #[cfg(feature = "litvm")]
+    #[cfg(feature = "grail")]
     GrailVerify {
         #[arg(long)]
         offer: PathBuf,
     },
     /// Verify then pay a Grail deposit (stubbed until a captured offer verifies).
-    #[cfg(feature = "litvm")]
+    #[cfg(feature = "grail")]
     GrailDeposit {
         /// Captured initiate/confirm JSON. Required until GRAIL_API_URL exists.
         #[arg(long)]
@@ -344,12 +344,12 @@ fn main() -> Result<()> {
             })?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        #[cfg(feature = "litvm")]
+        #[cfg(feature = "grail")]
         Command::GrailVerify { offer } => {
             let verified = grail_verify_file(&offer)?;
             println!("{}", serde_json::to_string_pretty(&verified)?);
         }
-        #[cfg(feature = "litvm")]
+        #[cfg(feature = "grail")]
         Command::GrailDeposit {
             offer,
             amount_sats,
@@ -371,14 +371,14 @@ fn open_litvm(app: &WalletApp, data_dir: &Path) -> Result<wallet_litvm::LitVmCli
     wallet_litvm::LitVmClient::open(data_dir, secret).context("open LitVM client")
 }
 
-#[cfg(feature = "litvm")]
+#[cfg(feature = "grail")]
 fn grail_verify_file(path: &Path) -> Result<grail::VerifiedDeposit> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let (request, offer) = grail::load_offer_json(&bytes).context("parse offer JSON")?;
     grail::verify_deposit_offer(&offer, &request).context("verify deposit offer")
 }
 
-#[cfg(feature = "litvm")]
+#[cfg(feature = "grail")]
 fn grail_deposit(
     app: &WalletApp,
     data_dir: &Path,

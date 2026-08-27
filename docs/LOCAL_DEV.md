@@ -13,7 +13,7 @@ Dev/
 ├── bdk/              LitecoinDevKit/bdk        (litecoin)
 ├── bdk_wallet/       LitecoinDevKit/bdk_wallet (litecoin)
 ├── rust-litecoin/    LitecoinDevKit/rust-litecoin
-└── grail-sdk-rust/   unofficial Grail client (path-dep from wallet-cli)
+└── grail-sdk-rust/   unofficial Grail client (optional; see below)
 ```
 
 Then add a gitignored `.cargo/config.toml` at this repo's root:
@@ -38,6 +38,12 @@ same package from both the manifest and config. To hack on rust-litecoin,
 temporarily change the manifest patch to
 `litecoin = { path = "../rust-litecoin/litecoin" }` and revert before
 committing.
+
+Grail CLI (`grail-verify` / `grail-deposit`) is off in the committed
+`wallet-cli` manifest so CI and release builds do not need the sibling.
+To enable it locally, uncomment the `grail` / `grail-bdk` path deps and the
+`grail = ["dep:grail", "dep:grail-bdk"]` feature line in
+`crates/wallet-cli/Cargo.toml`. Do not commit that.
 
 ## Bumping the pins for real
 

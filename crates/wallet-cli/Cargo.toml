@@ -6,13 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 description = "Smoke CLI for wallet-core create/sync/send on Litecoin (mainnet default)"
 
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("grail"))'] }
+
 [[bin]]
 name = "wallet-cli"
 path = "src/main.rs"
 
 [features]
 default = ["litvm"]
-litvm = ["dep:wallet-litvm", "dep:grail", "dep:grail-bdk"]
+litvm = ["dep:wallet-litvm"]
+# Local only: uncomment the two path deps below and set
+#   grail = ["dep:grail", "dep:grail-bdk"]
+# Path deps break `cargo metadata` in CI (sibling checkout is not present).
 
 [dependencies]
 anyhow = "1"
@@ -21,5 +27,5 @@ rpassword = "7"
 serde_json = "1"
 wallet-core = { path = "../wallet-core" }
 wallet-litvm = { path = "../wallet-litvm", optional = true }
-grail = { path = "../../../grail-sdk-rust/crates/grail", optional = true }
-grail-bdk = { path = "../../../grail-sdk-rust/crates/grail-bdk", optional = true }
+# grail = { path = "../../../grail-sdk-rust/crates/grail", optional = true }
+# grail-bdk = { path = "../../../grail-sdk-rust/crates/grail-bdk", optional = true }

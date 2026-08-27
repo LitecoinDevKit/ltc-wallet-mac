@@ -3202,27 +3202,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grail"
-version = "0.1.0"
-dependencies = [
- "hex",
- "litecoin",
- "musig2",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "ureq",
-]
-
-[[package]]
-name = "grail-bdk"
-version = "0.1.0"
-dependencies = [
- "grail",
- "litecoin",
-]
-
-[[package]]
 name = "grin_secp256k1zkp"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4238,21 +4217,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.19",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "musig2"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c5ffeab912897e7577287c8f2b4efbc4be24912f77531b45ba4b18c93f8be21"
-dependencies = [
- "base16ct",
- "hmac 0.12.1",
- "once_cell",
- "secp",
- "secp256k1 0.31.1",
- "sha2 0.10.9",
- "subtle",
 ]
 
 [[package]]
@@ -5778,18 +5742,6 @@ dependencies = [
  "serdect",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "secp"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d3b203895e8f18854c828d1cf7e5710683c3abc28d79330fe5ab723ce5b76e1"
-dependencies = [
- "base16ct",
- "once_cell",
- "secp256k1 0.31.1",
- "subtle",
 ]
 
 [[package]]
@@ -7350,8 +7302,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "grail",
- "grail-bdk",
  "rpassword",
  "serde_json",
  "wallet-core",

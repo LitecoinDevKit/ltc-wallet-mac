@@ -13,7 +13,7 @@ Paste or `@`-reference this file when starting a new Cursor chat in this repo.
   - `../bdk` (`LitecoinDevKit/bdk`, branch `litecoin`)
   - nested `../bdk/bdk_wallet`
   - `../rust-litecoin` via workspace `[patch]`
-  - `../grail-sdk-rust` (unofficial Grail client; LiteForge only; path-dep from `wallet-cli`)
+  - `../grail-sdk-rust` (unofficial Grail client; LiteForge only; not a CI path-dep — uncomment in `wallet-cli` locally)
 - **Alias rule:** Cargo `bitcoin` → `litecoin` crate.
   - Litecoin **mainnet** = `Network::Bitcoin`, BIP84 coin type **`2`**
   - Litecoin **testnet** = `Network::Testnet4`, coin type **`1`**
