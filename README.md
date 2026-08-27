@@ -1,6 +1,6 @@
 # ltc-wallet-mac
 
-Native Litecoin wallet for macOS and Linux, built on the Litecoin BDK fork ([`LitecoinDevKit/bdk`](https://github.com/LitecoinDevKit/bdk) + [`bdk_wallet`](https://github.com/LitecoinDevKit/bdk_wallet)), with a Tauri 2 shell.
+Native Litecoin wallet for macOS (Apple Silicon) and Linux (x86_64), built on the Litecoin BDK fork ([`LitecoinDevKit/bdk`](https://github.com/LitecoinDevKit/bdk) + [`bdk_wallet`](https://github.com/LitecoinDevKit/bdk_wallet)), with a Tauri 2 shell.
 
 **Rust product reference** for LitecoinDevKit integrators (maps-first MWEB via `wallet-core`, **not** UniFFI). Mobile bindings use a separate surface — see [ADOPTION.md](https://github.com/LitecoinDevKit/bdk/blob/litecoin/docs/ADOPTION.md).
 
@@ -8,9 +8,9 @@ Canonical MWEB shape in `wallet-core`: Electrum/RPC tip → `MwebStore` + LIP sy
 
 ## Status
 
-**v0.1** — BIP84 create/load, Electrum sync/send, encrypted mnemonic, receive QR, history, LTC amounts, auto-refresh.
+**v0.3.8** (prototype) — Public BIP84 + MWEB peg-in / private send / peg-out via LIP-0006 P2P + optional litecoind RPC. Encrypted mnemonic, coin control, receive QR, history. Not independently audited.
 
-**v0.2 (in progress)** — MWEB peg-in / private send / peg-out via LIP-0006 P2P + optional litecoind RPC.
+Ships **macOS Apple Silicon** (unsigned — Gatekeeper may say the app is damaged; `xattr -cr "/Applications/LTC Wallet.app"`) and **Linux x86_64** (`.deb` / `.AppImage`). No Intel Mac, ARM Linux, or Windows build.
 
 Read [`docs/CHAT_HANDOFF.md`](docs/CHAT_HANDOFF.md). Blueprint: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -88,7 +88,13 @@ npm run tauri build
 
 Artifacts under `src-tauri/target/release/bundle/` (or the workspace `target/` equivalent). Share the `.dmg`, or zip the `.app`.
 
-Unsigned builds trip Gatekeeper: recipients use Right-click → Open (or Privacy & Security → Open Anyway).
+Unsigned builds trip Gatekeeper. macOS may claim the app is damaged — it isn’t. After dragging it to Applications:
+
+```bash
+xattr -cr "/Applications/LTC Wallet.app"
+```
+
+Then launch normally. Fallback: Right-click → Open, or Privacy & Security → Open Anyway.
 
 Signed + notarized release (Apple Developer Program):
 
