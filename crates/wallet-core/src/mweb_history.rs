@@ -79,6 +79,27 @@ impl MwebHistory {
     pub fn is_known(&self, output_id_hex: &str) -> bool {
         self.known_outputs.contains(output_id_hex)
     }
+
+    /// Drop entries by id and forget their output ids so a later confirm can
+    /// be absorbed as a receive instead of staying invisible.
+    pub fn forget_ids(&mut self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let drop: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut released = Vec::new();
+        self.entries.retain(|entry| {
+            if drop.contains(entry.id.as_str()) {
+                released.extend(entry.output_ids.iter().cloned());
+                false
+            } else {
+                true
+            }
+        });
+        for id in released {
+            self.known_outputs.remove(&id);
+        }
+    }
 }
 
 /// Current unix time in seconds (0 if the clock is before the epoch).
@@ -174,5 +195,18 @@ mod tests {
         let h = MwebHistory::load(&dir.path().join("nope.json")).unwrap();
         assert!(h.entries.is_empty());
         assert!(h.known_outputs.is_empty());
+    }
+
+    #[test]
+    fn forget_ids_drops_entry_and_known_outputs() {
+        let mut h = MwebHistory::default();
+        h.record(entry("txid1", &["aa", "bb"]));
+        h.record(entry("txid2", &["cc"]));
+        h.forget_ids(&["txid1".into()]);
+        assert_eq!(h.entries.len(), 1);
+        assert_eq!(h.entries[0].id, "txid2");
+        assert!(!h.is_known("aa"));
+        assert!(!h.is_known("bb"));
+        assert!(h.is_known("cc"));
     }
 }

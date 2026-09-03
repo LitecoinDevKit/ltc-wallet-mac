@@ -496,6 +496,11 @@ impl MwebRuntime {
         network: WalletNetwork,
         progress: Option<Arc<SyncProgress>>,
     ) -> Result<(), bdk_mweb::Error> {
+        // Heal before this pass so a stuck split/send is included in the
+        // full UTXO download rather than waiting for a later sync.
+        if pending_unverifiable_outgoing(&self.history, self.store.db()) {
+            self.sync_state.invalidate_leafset();
+        }
         let mut pool = PeerPool::new(addrs);
         let syncer = MwebSyncer {
             progress,
@@ -539,12 +544,19 @@ impl MwebRuntime {
                     result.found.len()
                 );
                 self.absorb_received_coins();
+                let leafset = self.sync_state.leafset.clone();
                 update_outgoing_confirmations(
                     &mut self.history,
-                    self.store.db(),
-                    &self.sync_state.leafset,
+                    self.store.db_mut(),
+                    &leafset,
                     tip_height,
                 );
+                // Inputs recorded before leaf backfill cannot be checked against
+                // the current leafset. Force a full UTXO download next pass so
+                // sync can re-find the live coins and date or restore them.
+                if pending_unverifiable_outgoing(&self.history, self.store.db()) {
+                    self.sync_state.invalidate_leafset();
+                }
                 Ok(())
             }
             Err(e) => Err(e),
@@ -622,6 +634,148 @@ impl MwebRuntime {
     }
 }
 
+/// After this long an outgoing MWEB tx that never dated is treated as dropped.
+/// Regular sync otherwise leaves the input marked spent and the new coins
+/// unspendable forever (differential sync does not re-download old leaves).
+const UNCONFIRMED_MWEB_REVERT_SECS: u64 = 48 * 60 * 60;
+
+fn is_outgoing_mweb(kind: TxKind) -> bool {
+    matches!(
+        kind,
+        TxKind::Pegout | TxKind::MwebSend | TxKind::MwebSplit
+    )
+}
+
+/// Minimum inclusion height among coins this entry created, if any are dated.
+pub(crate) fn history_entry_height(
+    entry: &MwebHistoryEntry,
+    db: &MwebCoinDatabase,
+) -> Option<u32> {
+    let mut height = entry.confirmed_height;
+    for id_hex in &entry.output_ids {
+        let Some(id) = decode_output_id(id_hex) else {
+            continue;
+        };
+        let coin = db.get(&id).or_else(|| db.get_spent(&id));
+        if let Some(h) = coin.and_then(|c| c.block_height) {
+            height = Some(height.map_or(h, |cur| cur.min(h)));
+        }
+    }
+    height
+}
+
+fn date_undated_outputs(db: &mut MwebCoinDatabase, output_ids: &[String], height: u32) {
+    for id_hex in output_ids {
+        let Some(id) = decode_output_id(id_hex) else {
+            continue;
+        };
+        if db.get(&id).is_some_and(|c| c.block_height.is_none()) {
+            db.set_block_height(&id, height);
+        }
+    }
+}
+
+/// Pending outgoing txs whose spent inputs have no `leaf_index`, so the
+/// leafset cannot prove inclusion or drop. A full UTXO download re-finds them.
+pub(crate) fn pending_unverifiable_outgoing(
+    history: &MwebHistory,
+    db: &MwebCoinDatabase,
+) -> bool {
+    history.entries.iter().any(|entry| {
+        if entry.confirmed_height.is_some() || !is_outgoing_mweb(entry.kind) {
+            return false;
+        }
+        if history_entry_height(entry, db).is_some() {
+            return false;
+        }
+        entry.input_ids.iter().any(|id_hex| {
+            let Some(id) = decode_output_id(id_hex) else {
+                return false;
+            };
+            db.get(&id)
+                .or_else(|| db.get_spent(&id))
+                .is_some_and(|c| c.leaf_index.is_none())
+        })
+    })
+}
+
+fn restore_stale_unconfirmed_inputs(
+    history: &MwebHistory,
+    db: &mut MwebCoinDatabase,
+    leafset: &[u8],
+    now: u64,
+) {
+    if leafset.is_empty() {
+        return;
+    }
+    let input_ids: Vec<[u8; 32]> = history
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.confirmed_height.is_none()
+                && is_outgoing_mweb(entry.kind)
+                && now.saturating_sub(entry.timestamp) >= UNCONFIRMED_MWEB_REVERT_SECS
+        })
+        .flat_map(|entry| {
+            entry
+                .input_ids
+                .iter()
+                .filter_map(|id_hex| decode_output_id(id_hex))
+        })
+        .collect();
+    for id in input_ids {
+        let Some(coin) = db.get_spent(&id).cloned() else {
+            continue;
+        };
+        let Some(leaf) = coin.leaf_index else {
+            continue;
+        };
+        if leafset_has_leaf(leafset, leaf) {
+            db.insert(coin);
+        }
+    }
+}
+
+fn forget_stale_unlanded_outgoing(
+    history: &mut MwebHistory,
+    db: &mut MwebCoinDatabase,
+    now: u64,
+) {
+    let mut forget: Vec<String> = Vec::new();
+    for entry in &history.entries {
+        if entry.confirmed_height.is_some() || !is_outgoing_mweb(entry.kind) {
+            continue;
+        }
+        if now.saturating_sub(entry.timestamp) < UNCONFIRMED_MWEB_REVERT_SECS {
+            continue;
+        }
+        if history_entry_height(entry, db).is_some() {
+            continue;
+        }
+        if entry.input_ids.is_empty() {
+            continue;
+        }
+        let inputs_live_again = entry.input_ids.iter().all(|id_hex| {
+            let Some(id) = decode_output_id(id_hex) else {
+                return false;
+            };
+            db.get(&id).is_some()
+        });
+        if inputs_live_again {
+            forget.push(entry.id.clone());
+            for id_hex in &entry.output_ids {
+                let Some(id) = decode_output_id(id_hex) else {
+                    continue;
+                };
+                if db.get(&id).is_some_and(|c| c.block_height.is_none()) {
+                    let _ = db.mark_spent(&id);
+                }
+            }
+        }
+    }
+    history.forget_ids(&forget);
+}
+
 /// Resolve `confirmed_height` for outgoing MWEB entries (peg-outs and MWEB
 /// sends) after a successful sync at `tip`.
 ///
@@ -633,33 +787,36 @@ impl MwebRuntime {
 /// 3. Legacy entries with nothing to track (recorded before input tracking
 ///    existed, no change): resolved at `tip` rather than pending forever; the
 ///    inputs already left the balance at broadcast.
+///
+/// When (2) fires, undated local output coins are given `tip` so they become
+/// spendable. When a spend is still in the leafset after
+/// [`UNCONFIRMED_MWEB_REVERT_SECS`], the input is restored and the optimistic
+/// outputs / history row are dropped — otherwise a dropped split locks funds.
 pub(crate) fn update_outgoing_confirmations(
     history: &mut MwebHistory,
-    db: &MwebCoinDatabase,
+    db: &mut MwebCoinDatabase,
     leafset: &[u8],
     tip: u32,
 ) {
+    update_outgoing_confirmations_at(history, db, leafset, tip, now_ts());
+}
+
+fn update_outgoing_confirmations_at(
+    history: &mut MwebHistory,
+    db: &mut MwebCoinDatabase,
+    leafset: &[u8],
+    tip: u32,
+    now: u64,
+) {
+    restore_stale_unconfirmed_inputs(history, db, leafset, now);
+
     for entry in &mut history.entries {
-        if entry.confirmed_height.is_some()
-            || !matches!(
-                entry.kind,
-                TxKind::Pegout | TxKind::MwebSend | TxKind::MwebSplit
-            )
-        {
+        if entry.confirmed_height.is_some() || !is_outgoing_mweb(entry.kind) {
             continue;
         }
-        let mut height: Option<u32> = None;
-        for id_hex in &entry.output_ids {
-            let Some(id) = decode_output_id(id_hex) else {
-                continue;
-            };
-            let coin = db.get(&id).or_else(|| db.get_spent(&id));
-            if let Some(h) = coin.and_then(|c| c.block_height) {
-                height = Some(height.map_or(h, |cur| cur.min(h)));
-            }
-        }
-        if height.is_some() {
-            entry.confirmed_height = height;
+        if let Some(h) = history_entry_height(entry, db) {
+            entry.confirmed_height = Some(h);
+            date_undated_outputs(db, &entry.output_ids, h);
             continue;
         }
         if entry.input_ids.is_empty() {
@@ -686,8 +843,11 @@ pub(crate) fn update_outgoing_confirmations(
         });
         if all_inputs_gone {
             entry.confirmed_height = Some(tip);
+            date_undated_outputs(db, &entry.output_ids, tip);
         }
     }
+
+    forget_stale_unlanded_outgoing(history, db, now);
 }
 
 fn decode_output_id(id_hex: &str) -> Option<[u8; 32]> {
@@ -800,17 +960,28 @@ mod tests {
         out
     }
 
-    fn run(
+    fn run_at(
         entries: Vec<MwebHistoryEntry>,
-        db: &MwebCoinDatabase,
+        db: &mut MwebCoinDatabase,
         leaves: &[u64],
-    ) -> Vec<Option<u32>> {
+        now: u64,
+    ) -> (Vec<Option<u32>>, MwebHistory) {
         let mut history = MwebHistory::default();
         for e in entries {
             history.record(e);
         }
-        update_outgoing_confirmations(&mut history, db, &leafset(leaves), TIP);
-        history.entries.iter().map(|e| e.confirmed_height).collect()
+        update_outgoing_confirmations_at(&mut history, db, &leafset(leaves), TIP, now);
+        let heights = history.entries.iter().map(|e| e.confirmed_height).collect();
+        (heights, history)
+    }
+
+    fn run(
+        entries: Vec<MwebHistoryEntry>,
+        db: &mut MwebCoinDatabase,
+        leaves: &[u64],
+    ) -> Vec<Option<u32>> {
+        // One hour after the fixture timestamp — still inside the revert window.
+        run_at(entries, db, leaves, 1_700_000_000 + 3600).0
     }
 
     #[test]
@@ -820,7 +991,7 @@ mod tests {
         // Inputs still in the leafset must not matter once change is dated.
         db.insert(coin(2, Some(100), Some(3)));
         db.mark_spent(&[2; 32]);
-        let got = run(vec![entry(TxKind::Pegout, &[1], &[2])], &db, &[3, 7]);
+        let got = run(vec![entry(TxKind::Pegout, &[1], &[2])], &mut db, &[3, 7]);
         assert_eq!(got, vec![Some(150)]);
     }
 
@@ -829,7 +1000,7 @@ mod tests {
         let mut db = MwebCoinDatabase::default();
         db.insert(coin(2, Some(100), Some(3)));
         db.mark_spent(&[2; 32]);
-        let got = run(vec![entry(TxKind::Pegout, &[], &[2])], &db, &[9]);
+        let got = run(vec![entry(TxKind::Pegout, &[], &[2])], &mut db, &[9]);
         assert_eq!(got, vec![Some(TIP)]);
     }
 
@@ -838,15 +1009,17 @@ mod tests {
         let mut db = MwebCoinDatabase::default();
         db.insert(coin(2, Some(100), Some(3)));
         db.mark_spent(&[2; 32]);
-        let got = run(vec![entry(TxKind::MwebSend, &[], &[2])], &db, &[3]);
+        let got = run(vec![entry(TxKind::MwebSend, &[], &[2])], &mut db, &[3]);
         assert_eq!(got, vec![None]);
+        assert!(db.get(&[2; 32]).is_none(), "recent pending spend stays spent");
+        assert!(db.get_spent(&[2; 32]).is_some());
     }
 
     #[test]
     fn input_missing_from_store_counts_as_confirmed_spent() {
         // After an MWEB wipe/resync a confirmed-spent coin is never re-found.
-        let db = MwebCoinDatabase::default();
-        let got = run(vec![entry(TxKind::Pegout, &[], &[2])], &db, &[9]);
+        let mut db = MwebCoinDatabase::default();
+        let got = run(vec![entry(TxKind::Pegout, &[], &[2])], &mut db, &[9]);
         assert_eq!(got, vec![Some(TIP)]);
     }
 
@@ -855,8 +1028,16 @@ mod tests {
         let mut db = MwebCoinDatabase::default();
         db.insert(coin(2, None, None));
         db.mark_spent(&[2; 32]);
-        let got = run(vec![entry(TxKind::Pegout, &[], &[2])], &db, &[9]);
+        let got = run(vec![entry(TxKind::Pegout, &[], &[2])], &mut db, &[9]);
         assert_eq!(got, vec![None]);
+        assert!(pending_unverifiable_outgoing(
+            &{
+                let mut h = MwebHistory::default();
+                h.record(entry(TxKind::Pegout, &[], &[2]));
+                h
+            },
+            &db
+        ));
     }
 
     #[test]
@@ -865,26 +1046,66 @@ mod tests {
         db.insert(coin(1, None, None));
         db.insert(coin(2, Some(100), Some(3)));
         db.mark_spent(&[2; 32]);
-        let got = run(vec![entry(TxKind::Pegout, &[1], &[2])], &db, &[3]);
+        let got = run(vec![entry(TxKind::Pegout, &[1], &[2])], &mut db, &[3]);
         assert_eq!(got, vec![None]);
     }
 
     #[test]
     fn legacy_trackless_entry_resolves_at_tip() {
-        let db = MwebCoinDatabase::default();
-        let got = run(vec![entry(TxKind::Pegout, &[], &[])], &db, &[0]);
+        let mut db = MwebCoinDatabase::default();
+        let got = run(vec![entry(TxKind::Pegout, &[], &[])], &mut db, &[0]);
         assert_eq!(got, vec![Some(TIP)]);
     }
 
     #[test]
+    fn confirmed_split_dates_undated_outputs() {
+        let mut db = MwebCoinDatabase::default();
+        db.insert(coin(1, None, None));
+        db.insert(coin(2, Some(100), Some(3)));
+        db.mark_spent(&[2; 32]);
+        let got = run(
+            vec![entry(TxKind::MwebSplit, &[1], &[2])],
+            &mut db,
+            &[9],
+        );
+        assert_eq!(got, vec![Some(TIP)]);
+        assert_eq!(db.get(&[1; 32]).unwrap().block_height, Some(TIP));
+        assert!(db.get(&[1; 32]).unwrap().is_spendable(TIP, 6));
+    }
+
+    #[test]
+    fn stale_unconfirmed_split_restores_input() {
+        let mut db = MwebCoinDatabase::default();
+        db.insert(coin(1, None, None));
+        db.insert(coin(2, Some(100), Some(3)));
+        db.mark_spent(&[2; 32]);
+        let now = 1_700_000_000 + UNCONFIRMED_MWEB_REVERT_SECS + 1;
+        let (heights, history) = run_at(
+            vec![entry(TxKind::MwebSplit, &[1], &[2])],
+            &mut db,
+            &[3, 9],
+            now,
+        );
+        assert!(heights.is_empty(), "dropped split must leave history: {heights:?}");
+        assert!(history.entries.is_empty());
+        assert!(
+            db.get(&[2; 32]).is_some(),
+            "original coin must be spendable again"
+        );
+        assert!(
+            db.get(&[1; 32]).is_none(),
+            "optimistic split outputs must not stay in the unspent set"
+        );
+    }
+
+    #[test]
     fn non_outgoing_kinds_are_untouched() {
-        let db = MwebCoinDatabase::default();
         let got = run(
             vec![
                 entry(TxKind::Pegin, &[], &[]),
                 entry(TxKind::MwebReceive, &[], &[]),
             ],
-            &db,
+            &mut MwebCoinDatabase::default(),
             &[0],
         );
         assert_eq!(got, vec![None, None]);
@@ -1130,7 +1351,7 @@ mod tests {
         db.insert(coin(1, Some(150), Some(7)));
         let mut e = entry(TxKind::Pegout, &[1], &[]);
         e.confirmed_height = Some(50);
-        let got = run(vec![e], &db, &[7]);
+        let got = run(vec![e], &mut db, &[7]);
         assert_eq!(got, vec![Some(50)]);
     }
 
@@ -1381,8 +1602,8 @@ mod tests {
     fn empty_leafset_defers_input_based_resolution() {
         let mut history = MwebHistory::default();
         history.record(entry(TxKind::Pegout, &[], &[2]));
-        let db = MwebCoinDatabase::default();
-        update_outgoing_confirmations(&mut history, &db, &[], TIP);
+        let mut db = MwebCoinDatabase::default();
+        update_outgoing_confirmations(&mut history, &mut db, &[], TIP);
         assert_eq!(history.entries[0].confirmed_height, None);
     }
 }

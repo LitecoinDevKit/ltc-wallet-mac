@@ -2674,27 +2674,23 @@ fn merge_mweb_history(records: &mut Vec<TxRecord>, mweb: &MwebRuntime, tip: u32)
             if entry.fee_sats.is_some() {
                 records[i].fee_sats = entry.fee_sats;
             }
+            // Electrum cannot confirm hybrid MWEB txs, so a peg-in can sit in
+            // the BDK graph as unconfirmed forever even after the private coin
+            // is dated. Overlay the MWEB height so History and spendability
+            // agree with the coin store.
+            if records[i].confirmations == 0 {
+                if let Some(h) = mweb::history_entry_height(entry, mweb.store.db()) {
+                    records[i].height = Some(h);
+                    records[i].confirmations = tip.saturating_sub(h).saturating_add(1);
+                }
+            }
             continue;
         }
         // Prefer the height resolved and persisted at sync time (covers
         // peg-outs with no change coin, and survives an MWEB resync).
         // Fall back to the coins this tx created for us (received coins,
         // or the change coin of an outgoing tx).
-        let mut height: Option<u32> = entry.confirmed_height;
-        for id_hex in &entry.output_ids {
-            let Ok(bytes) = hex::decode(id_hex) else { continue };
-            let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) else {
-                continue;
-            };
-            let coin = mweb
-                .store
-                .db()
-                .get(&id)
-                .or_else(|| mweb.store.db().get_spent(&id));
-            if let Some(h) = coin.and_then(|c| c.block_height) {
-                height = Some(height.map_or(h, |cur| cur.min(h)));
-            }
-        }
+        let height = mweb::history_entry_height(entry, mweb.store.db());
         let confirmations = height
             .map(|h| tip.saturating_sub(h).saturating_add(1))
             .unwrap_or(0);
@@ -2758,6 +2754,61 @@ mod tests {
         let pending = records.iter().find(|r| r.txid == "wtxid2").unwrap();
         assert_eq!(pending.height, None);
         assert_eq!(pending.confirmations, 0);
+    }
+
+    #[test]
+    fn merge_overlays_mweb_height_on_unconfirmed_bdk_pegin() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret =
+            MasterSecret::parse(&descriptors::generate_mnemonic().unwrap(), None).unwrap();
+        let mut mweb = MwebRuntime::open(
+            dir.path(),
+            &secret,
+            WalletNetwork::Testnet,
+            MwebScheme::default().to_master_scheme(),
+            None,
+        )
+        .unwrap();
+        let output_id = [0x11u8; 32];
+        mweb.store.db_mut().insert(bdk_mweb::MwebCoin {
+            output_id,
+            commitment: [0; 33],
+            amount: 1_000_000,
+            address_index: 0,
+            blind: [0; 32],
+            shared_secret: [0; 32],
+            spend_key: Some([1; 32]),
+            block_height: Some(90),
+            is_pegin: true,
+            leaf_index: Some(4),
+        });
+        mweb.history.record(MwebHistoryEntry {
+            id: "pegin-txid".into(),
+            kind: TxKind::Pegin,
+            net_sats: -1_050_000,
+            fee_sats: Some(51_000),
+            timestamp: 1_700_000_000,
+            output_ids: vec![hex::encode(output_id)],
+            input_ids: Vec::new(),
+            confirmed_height: None,
+        });
+        let mut records = vec![TxRecord {
+            txid: "pegin-txid".into(),
+            net_sats: -1_000_000,
+            sent_sats: 1_000_000,
+            received_sats: 0,
+            fee_sats: Some(1_000),
+            height: None,
+            confirmations: 0,
+            timestamp: Some(1_700_000_000),
+            kind: TxKind::Transparent,
+        }];
+        merge_mweb_history(&mut records, &mweb, 100);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, TxKind::Pegin);
+        assert_eq!(records[0].fee_sats, Some(51_000));
+        assert_eq!(records[0].height, Some(90));
+        assert_eq!(records[0].confirmations, 11);
     }
 }
 
